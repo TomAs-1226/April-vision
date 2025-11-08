@@ -9,6 +9,7 @@
 #include <chrono>
 #include <fstream>
 #include <sstream>
+#include <iomanip>
 
 // Undefine Windows macros
 #ifdef max
@@ -17,10 +18,6 @@
 #ifdef min
 #undef min
 #endif
-
-using namespace vision_config;
-
-// ... rest of your main.cpp code stays the same
 class VisionApp {
 public:
     VisionApp()

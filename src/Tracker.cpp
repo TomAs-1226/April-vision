@@ -10,8 +10,6 @@
 #undef min
 #endif
 
-using namespace vision_config;
-
 BoxTracker::BoxTracker(double q, double r)
     : q_(q), r_(r), unseenCount_(0.0), initialized_(false)
 {
@@ -59,9 +57,9 @@ Eigen::VectorXd BoxTracker::predict() {
     P_ = F_ * P_ * F_.transpose() + Q_;
 
     // Apply velocity decay
-    x_(3) *= VELOCITY_DECAY;
-    x_(4) *= VELOCITY_DECAY;
-    x_(5) *= VELOCITY_DECAY;
+    x_(3) *= config::VELOCITY_DECAY;
+    x_(4) *= config::VELOCITY_DECAY;
+    x_(5) *= config::VELOCITY_DECAY;
 
     unseenCount_ += dt;
 

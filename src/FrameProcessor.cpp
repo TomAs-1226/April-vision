@@ -3,6 +3,9 @@
 #include <iostream>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <sstream>
+#include <iomanip>
 
 // Undefine Windows macros
 #ifdef max
@@ -15,10 +18,6 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
-
-using namespace vision_config;
-
-// ... rest of your FrameProcessor.cpp code stays the same
 FrameProcessor::FrameProcessor()
     : tagSizeM_(config::DEFAULT_TAG_SIZE_M)
     , useCLAHE_(true)

@@ -63,6 +63,5 @@ public:
         double& tx_deg, double& ty_deg, double& ta_percent
     );
 
-private:
     static double polygonArea(const std::vector<cv::Point2f>& pts);
 };

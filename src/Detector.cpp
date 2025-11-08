@@ -9,8 +9,6 @@ extern "C" {
     #include "common/image_u8.h"
 }
 
-using namespace vision_config;
-
 Detector::Detector() {
     // Create tag family
     tf_ = tag36h11_create();
@@ -20,7 +18,7 @@ Detector::Detector() {
     apriltag_detector_add_family(td_, tf_);
 
     // Configure detector for performance
-    td_->quad_decimate = DEFAULT_DECIMATE;
+    td_->quad_decimate = config::DEFAULT_DECIMATE;
     td_->quad_sigma = 0.0f;
     td_->nthreads = 4;
     td_->refine_edges = 1;

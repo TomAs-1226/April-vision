@@ -2,6 +2,10 @@
 #include <iostream>
 #include <sstream>
 #include <iomanip>
+#include <cstring>
+#ifndef _WIN32
+#include <fcntl.h>
+#endif
 
 NetworkPublisher::NetworkPublisher(const std::string& ntServer,
                                  const std::string& udpIp,

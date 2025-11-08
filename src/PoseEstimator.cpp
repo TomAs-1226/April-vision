@@ -8,8 +8,6 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-using namespace vision_config;
-
 // ============ EMASmoother ============
 EMASmoother::EMASmoother(double alpha)
     : alpha_(alpha), initialized_(false) {}
@@ -128,7 +126,7 @@ std::optional<PoseResult> PoseEstimator::solvePose(
     double avgError = totalError / corners.size();
 
     // Validate reprojection error
-    if (!std::isfinite(avgError) || avgError > REPROJ_ERR_THRESH) {
+    if (!std::isfinite(avgError) || avgError > config::REPROJ_ERR_THRESH) {
         return std::nullopt;
     }
 
@@ -145,7 +143,8 @@ void PoseEstimator::defaultCameraMatrix(int width, int height, cv::Mat& K, cv::M
     int maxDim = (width > height) ? width : height;
     double focalLength = 0.9 * static_cast<double>(maxDim);
 
-    K = (cv::Mat_<double>(3, 3 focalLength,   0.0,          static_cast<double>(width) / 2.0,
+    K = (cv::Mat_<double>(3, 3) <<
+        focalLength,   0.0,          static_cast<double>(width) / 2.0,
         0.0,           focalLength,  static_cast<double>(height) / 2.0,
         0.0,           0.0,          1.0
     );
