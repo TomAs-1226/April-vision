@@ -10,6 +10,8 @@
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
+#include <string>
 
 // Undefine Windows macros
 #ifdef max
@@ -48,23 +50,66 @@ public:
         running_ = true;
 
         // Create control window
-        cv::namedWindow("AprilTag Vision - Controls", cv::WINDOW_AUTOSIZE);
-        cv::namedWindow("AprilTag Vision - Feed", cv::WINDOW_NORMAL);
+        const std::string controlsWindow = "AprilTag Vision - Controls";
+        const std::string feedWindow = "AprilTag Vision - Feed";
+        cv::namedWindow(controlsWindow, cv::WINDOW_AUTOSIZE);
+        cv::namedWindow(feedWindow, cv::WINDOW_NORMAL);
 
-        // Create trackbars for controls
-        int decimateVal = config::DEFAULT_DECIMATE;
-        int claheVal = 1;
-        int gammaVal = 125; // Gamma * 100
-        int emaPosVal = static_cast<int>(config::EMA_ALPHA_POS * 100);
-        int emaPoseVal = static_cast<int>(config::EMA_ALPHA_POSE * 100);
-        int publishNTVal = 0;
+        struct TrackbarState {
+            std::atomic<int> decimate{config::DEFAULT_DECIMATE};
+            std::atomic<int> clahe{1};
+            std::atomic<int> gamma{125};
+            std::atomic<int> emaPos{static_cast<int>(config::EMA_ALPHA_POS * 100)};
+            std::atomic<int> emaPose{static_cast<int>(config::EMA_ALPHA_POSE * 100)};
+            std::atomic<int> publishNT{0};
+        } trackbars;
 
-        cv::createTrackbar("Decimate", "AprilTag Vision - Controls", &decimateVal, 5);
-        cv::createTrackbar("CLAHE", "AprilTag Vision - Controls", &claheVal, 1);
-        cv::createTrackbar("Gamma x100", "AprilTag Vision - Controls", &gammaVal, 300);
-        cv::createTrackbar("EMA Pos x100", "AprilTag Vision - Controls", &emaPosVal, 100);
-        cv::createTrackbar("EMA Pose x100", "AprilTag Vision - Controls", &emaPoseVal, 100);
-        cv::createTrackbar("Publish NT", "AprilTag Vision - Controls", &publishNTVal, 1);
+        struct TrackbarParam {
+            const char* name;
+            const std::string* window;
+            std::atomic<int>* target;
+            int minValue;
+            int maxValue;
+        };
+
+        auto trackbarCallback = [](int pos, void* userdata) {
+            if (!userdata) {
+                return;
+            }
+
+            auto* param = static_cast<TrackbarParam*>(userdata);
+            if (!param->target) {
+                return;
+            }
+
+            const int clamped = std::clamp(pos, param->minValue, param->maxValue);
+            if (clamped != pos) {
+                cv::setTrackbarPos(param->name, *param->window, clamped);
+            }
+
+            param->target->store(clamped, std::memory_order_relaxed);
+        };
+
+        TrackbarParam decimateParam{"Decimate", &controlsWindow, &trackbars.decimate, 1, 5};
+        TrackbarParam claheParam{"CLAHE", &controlsWindow, &trackbars.clahe, 0, 1};
+        TrackbarParam gammaParam{"Gamma x100", &controlsWindow, &trackbars.gamma, 0, 300};
+        TrackbarParam emaPosParam{"EMA Pos x100", &controlsWindow, &trackbars.emaPos, 0, 100};
+        TrackbarParam emaPoseParam{"EMA Pose x100", &controlsWindow, &trackbars.emaPose, 0, 100};
+        TrackbarParam publishParam{"Publish NT", &controlsWindow, &trackbars.publishNT, 0, 1};
+
+        cv::createTrackbar(decimateParam.name, controlsWindow, nullptr, decimateParam.maxValue, trackbarCallback, &decimateParam);
+        cv::createTrackbar(claheParam.name, controlsWindow, nullptr, claheParam.maxValue, trackbarCallback, &claheParam);
+        cv::createTrackbar(gammaParam.name, controlsWindow, nullptr, gammaParam.maxValue, trackbarCallback, &gammaParam);
+        cv::createTrackbar(emaPosParam.name, controlsWindow, nullptr, emaPosParam.maxValue, trackbarCallback, &emaPosParam);
+        cv::createTrackbar(emaPoseParam.name, controlsWindow, nullptr, emaPoseParam.maxValue, trackbarCallback, &emaPoseParam);
+        cv::createTrackbar(publishParam.name, controlsWindow, nullptr, publishParam.maxValue, trackbarCallback, &publishParam);
+
+        cv::setTrackbarPos(decimateParam.name, controlsWindow, trackbars.decimate.load(std::memory_order_relaxed));
+        cv::setTrackbarPos(claheParam.name, controlsWindow, trackbars.clahe.load(std::memory_order_relaxed));
+        cv::setTrackbarPos(gammaParam.name, controlsWindow, trackbars.gamma.load(std::memory_order_relaxed));
+        cv::setTrackbarPos(emaPosParam.name, controlsWindow, trackbars.emaPos.load(std::memory_order_relaxed));
+        cv::setTrackbarPos(emaPoseParam.name, controlsWindow, trackbars.emaPose.load(std::memory_order_relaxed));
+        cv::setTrackbarPos(publishParam.name, controlsWindow, trackbars.publishNT.load(std::memory_order_relaxed));
 
         std::cout << "\n=== Controls ===" << std::endl;
         std::cout << "C - Toggle camera mode" << std::endl;
@@ -77,12 +122,21 @@ public:
 
         publisher_->start();
 
+        startCamera();
+
         cv::Mat displayFrame;
         auto lastFrameTime = std::chrono::steady_clock::now();
         const double targetFrameTime = 1.0 / config::GUI_RATE_HZ;
 
         while (running_) {
             // Update processor settings from trackbars
+            const int decimateVal = trackbars.decimate.load(std::memory_order_relaxed);
+            const int claheVal = trackbars.clahe.load(std::memory_order_relaxed);
+            const int gammaVal = trackbars.gamma.load(std::memory_order_relaxed);
+            const int emaPosVal = trackbars.emaPos.load(std::memory_order_relaxed);
+            const int emaPoseVal = trackbars.emaPose.load(std::memory_order_relaxed);
+            const int publishNTVal = trackbars.publishNT.load(std::memory_order_relaxed);
+
             processor_->setDecimate(std::max(1, decimateVal));
             processor_->enableCLAHE(claheVal > 0);
             processor_->setGamma(std::max(0.1, gammaVal / 100.0));
@@ -122,9 +176,18 @@ public:
             }
 
             // Display frame
-            if (!displayFrame.empty()) {
-                cv::imshow("AprilTag Vision - Feed", displayFrame);
+            cv::Mat frameToShow = displayFrame;
+            if (frameToShow.empty()) {
+                frameToShow = cv::Mat(480, 640, CV_8UC3, cv::Scalar(32, 32, 32));
+                const bool cameraActive = cameraRunning_.load(std::memory_order_relaxed);
+                const std::string message = cameraActive
+                    ? "Waiting for camera frames..."
+                    : "Press C to start camera or load images";
+                cv::putText(frameToShow, message, cv::Point(40, 240),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 200, 255), 2);
             }
+
+            cv::imshow(feedWindow, frameToShow);
 
             // Handle keyboard input
             int key = cv::waitKey(1);
@@ -182,6 +245,11 @@ private:
         cap_->set(cv::CAP_PROP_FPS, config::CAPTURE_FPS);
         cap_->set(cv::CAP_PROP_BUFFERSIZE, 1);
 
+        {
+            std::lock_guard<std::mutex> lock(frameMutex_);
+            latestFrame_.release();
+        }
+
         cameraRunning_ = true;
         useCamera_ = true;
         captureThread_ = std::thread(&VisionApp::captureLoop, this);
@@ -204,6 +272,11 @@ private:
             cap_.reset();
         }
 
+        {
+            std::lock_guard<std::mutex> lock(frameMutex_);
+            latestFrame_.release();
+        }
+
         std::cout << "[VisionApp] Camera stopped" << std::endl;
     }
 
@@ -220,6 +293,8 @@ private:
     }
 
     void openImages() {
+        stopCamera();
+
         // Note: OpenCV doesn't have a built-in file dialog
         // You'd need to implement this with system-specific code or use a library
         std::cout << "[VisionApp] Enter image paths (comma-separated): ";
