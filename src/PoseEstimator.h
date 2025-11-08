@@ -64,4 +64,6 @@ public:
     );
 
     static double polygonArea(const std::vector<cv::Point2f>& pts);
+
+    static std::vector<cv::Point2f> orderCorners(const std::vector<cv::Point2f>& corners);
 };

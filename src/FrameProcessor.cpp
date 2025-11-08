@@ -191,7 +191,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         visibleIds.insert(det.id);
 
         // Refine corners if area is large enough
-        std::vector<cv::Point2f> corners = det.corners;
+        std::vector<cv::Point2f> corners = PoseEstimator::orderCorners(det.corners);
         double area = PoseEstimator::polygonArea(corners);
 
         if (area > 30.0) {

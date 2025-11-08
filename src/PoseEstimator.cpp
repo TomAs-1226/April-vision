@@ -80,13 +80,15 @@ std::optional<PoseResult> PoseEstimator::solvePose(
         return std::nullopt;
     }
 
+    const std::vector<cv::Point2f> orderedCorners = orderCorners(corners);
+
     // 3D object points (tag corners in tag frame)
     const double half = tagSizeMeters / 2.0;
     std::vector<cv::Point3f> objPoints = {
-        cv::Point3f(static_cast<float>(-half), static_cast<float>(-half), 0.0f),
-        cv::Point3f(static_cast<float>(half), static_cast<float>(-half), 0.0f),
-        cv::Point3f(static_cast<float>(half), static_cast<float>(half), 0.0f),
-        cv::Point3f(static_cast<float>(-half), static_cast<float>(half), 0.0f)
+        cv::Point3f(static_cast<float>(-half), static_cast<float>(half), 0.0f),   // top-left
+        cv::Point3f(static_cast<float>(half), static_cast<float>(half), 0.0f),    // top-right
+        cv::Point3f(static_cast<float>(half), static_cast<float>(-half), 0.0f),   // bottom-right
+        cv::Point3f(static_cast<float>(-half), static_cast<float>(-half), 0.0f)   // bottom-left
     };
 
     cv::Vec3d rvec, tvec;
@@ -94,7 +96,7 @@ std::optional<PoseResult> PoseEstimator::solvePose(
     // Try IPPE_SQUARE first
     bool success = false;
     try {
-        success = cv::solvePnP(objPoints, corners, cameraMatrix, distCoeffs,
+        success = cv::solvePnP(objPoints, orderedCorners, cameraMatrix, distCoeffs,
                               rvec, tvec, false, cv::SOLVEPNP_IPPE_SQUARE);
     } catch (...) {
         success = false;
@@ -103,7 +105,7 @@ std::optional<PoseResult> PoseEstimator::solvePose(
     // Fallback to iterative
     if (!success) {
         try {
-            success = cv::solvePnP(objPoints, corners, cameraMatrix, distCoeffs,
+            success = cv::solvePnP(objPoints, orderedCorners, cameraMatrix, distCoeffs,
                                   rvec, tvec, false, cv::SOLVEPNP_ITERATIVE);
         } catch (...) {
             return std::nullopt;
@@ -119,11 +121,11 @@ std::optional<PoseResult> PoseEstimator::solvePose(
     cv::projectPoints(objPoints, rvec, tvec, cameraMatrix, distCoeffs, projectedPoints);
 
     double totalError = 0.0;
-    for (size_t i = 0; i < corners.size(); i++) {
-        cv::Point2f diff = corners[i] - projectedPoints[i];
+    for (size_t i = 0; i < orderedCorners.size(); i++) {
+        cv::Point2f diff = orderedCorners[i] - projectedPoints[i];
         totalError += cv::norm(diff);
     }
-    double avgError = totalError / corners.size();
+    double avgError = totalError / orderedCorners.size();
 
     // Validate reprojection error
     if (!std::isfinite(avgError) || avgError > config::REPROJ_ERR_THRESH) {
@@ -195,4 +197,29 @@ double PoseEstimator::polygonArea(const std::vector<cv::Point2f>& pts) {
         area -= pts[j].x * pts[i].y;
     }
     return std::abs(area) * 0.5;
+}
+
+std::vector<cv::Point2f> PoseEstimator::orderCorners(const std::vector<cv::Point2f>& corners) {
+    if (corners.size() != 4) {
+        return corners;
+    }
+
+    std::vector<cv::Point2f> ordered(4);
+    std::vector<cv::Point2f> sorted = corners;
+
+    std::sort(sorted.begin(), sorted.end(), [](const cv::Point2f& a, const cv::Point2f& b) {
+        return (a.x + a.y) < (b.x + b.y);
+    });
+
+    ordered[0] = sorted.front();  // top-left (smallest sum)
+    ordered[2] = sorted.back();   // bottom-right (largest sum)
+
+    std::sort(sorted.begin(), sorted.end(), [](const cv::Point2f& a, const cv::Point2f& b) {
+        return (a.y - a.x) < (b.y - b.x);
+    });
+
+    ordered[1] = sorted.front();  // top-right (smallest diff)
+    ordered[3] = sorted.back();   // bottom-left (largest diff)
+
+    return ordered;
 }
