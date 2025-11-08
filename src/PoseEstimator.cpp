@@ -2,6 +2,7 @@
 #include "Config.h"
 #include <cmath>
 #include <algorithm>
+#include <utility>
 
 // Define M_PI for MSVC
 #ifndef M_PI
@@ -204,22 +205,51 @@ std::vector<cv::Point2f> PoseEstimator::orderCorners(const std::vector<cv::Point
         return corners;
     }
 
-    std::vector<cv::Point2f> ordered(4);
-    std::vector<cv::Point2f> sorted = corners;
+    cv::Point2f center(0.f, 0.f);
+    for (const auto& pt : corners) {
+        center += pt;
+    }
+    center *= 0.25f;
 
-    std::sort(sorted.begin(), sorted.end(), [](const cv::Point2f& a, const cv::Point2f& b) {
-        return (a.x + a.y) < (b.x + b.y);
+    std::vector<std::pair<double, cv::Point2f>> anglePoints;
+    anglePoints.reserve(4);
+    for (const auto& pt : corners) {
+        double angle = std::atan2(pt.y - center.y, pt.x - center.x);
+        anglePoints.emplace_back(angle, pt);
+    }
+
+    std::sort(anglePoints.begin(), anglePoints.end(), [](const auto& a, const auto& b) {
+        return a.first < b.first;
     });
 
-    ordered[0] = sorted.front();  // top-left (smallest sum)
-    ordered[2] = sorted.back();   // bottom-right (largest sum)
+    std::vector<cv::Point2f> ordered;
+    ordered.reserve(4);
+    for (const auto& ap : anglePoints) {
+        ordered.push_back(ap.second);
+    }
 
-    std::sort(sorted.begin(), sorted.end(), [](const cv::Point2f& a, const cv::Point2f& b) {
-        return (a.y - a.x) < (b.y - b.x);
+    auto topLeftIt = std::min_element(ordered.begin(), ordered.end(), [](const cv::Point2f& a, const cv::Point2f& b) {
+        const float sumA = a.x + a.y;
+        const float sumB = b.x + b.y;
+        if (std::abs(sumA - sumB) < 1e-4f) {
+            if (std::abs(a.y - b.y) < 1e-4f) {
+                return a.x < b.x;
+            }
+            return a.y < b.y;
+        }
+        return sumA < sumB;
     });
 
-    ordered[1] = sorted.front();  // top-right (smallest diff)
-    ordered[3] = sorted.back();   // bottom-left (largest diff)
+    if (topLeftIt != ordered.begin()) {
+        std::rotate(ordered.begin(), topLeftIt, ordered.end());
+    }
+
+    const double cross =
+        (ordered[1].x - ordered[0].x) * (ordered[2].y - ordered[0].y) -
+        (ordered[1].y - ordered[0].y) * (ordered[2].x - ordered[0].x);
+    if (cross < 0.0) {
+        std::reverse(ordered.begin() + 1, ordered.end());
+    }
 
     return ordered;
 }
