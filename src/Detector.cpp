@@ -2,6 +2,7 @@
 #include "Config.h"
 #include <iostream>
 #include <cstring>
+#include <thread>
 
 extern "C" {
     #include "apriltag.h"
@@ -20,11 +21,21 @@ Detector::Detector() {
     // Configure detector for performance
     td_->quad_decimate = config::DEFAULT_DECIMATE;
     td_->quad_sigma = 0.0f;
-    td_->nthreads = 4;
+
+    int configuredThreads = config::DETECTOR_THREADS;
+    if (configuredThreads <= 0) {
+        unsigned int hw = std::thread::hardware_concurrency();
+        if (hw == 0) {
+            hw = 4;
+        }
+        configuredThreads = static_cast<int>(std::max(2u, std::min(hw, 8u)));
+    }
+    td_->nthreads = configuredThreads;
     td_->refine_edges = 1;
     td_->decode_sharpening = 0.25;
 
-    std::cout << "[Detector] Initialized with 36h11 family" << std::endl;
+    std::cout << "[Detector] Initialized with 36h11 family";
+    std::cout << " | threads=" << td_->nthreads << std::endl;
 }
 
 Detector::~Detector() {

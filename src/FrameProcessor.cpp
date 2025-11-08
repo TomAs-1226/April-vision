@@ -77,19 +77,21 @@ void FrameProcessor::buildGammaLUT(double gamma) {
 }
 
 cv::Mat FrameProcessor::preprocessImage(const cv::Mat& gray) {
-    cv::Mat result;
-
-    if (useCLAHE_) {
-        clahe_->apply(gray, result);
-
-        if (std::abs(gamma_ - 1.0) > 1e-3) {
-            cv::LUT(result, gammaLUT_, result);
-        }
-    } else {
-        result = gray.clone();
+    if (preprocessBuf_.empty() || preprocessBuf_.size() != gray.size()) {
+        preprocessBuf_.create(gray.size(), gray.type());
     }
 
-    return result;
+    if (useCLAHE_) {
+        clahe_->apply(gray, preprocessBuf_);
+    } else {
+        gray.copyTo(preprocessBuf_);
+    }
+
+    if (std::abs(gamma_ - 1.0) > 1e-3) {
+        cv::LUT(preprocessBuf_, gammaLUT_, preprocessBuf_);
+    }
+
+    return preprocessBuf_;
 }
 
 double FrameProcessor::computeBlurVariance(const cv::Mat& gray) {
@@ -103,13 +105,17 @@ double FrameProcessor::computeBlurVariance(const cv::Mat& gray) {
 }
 
 int FrameProcessor::chooseDecimate(int base, double blurVar) {
+    int decimate = std::max(1, base);
+
     if (blurVar < config::BLUR_HIGH) {
-        return std::max(base, config::ADAPT_DECIMATE_HIGH);
+        decimate = std::min(decimate, config::ADAPT_DECIMATE_LOW);
     } else if (blurVar < config::BLUR_MED) {
-        return std::max(base, config::ADAPT_DECIMATE_MED);
+        decimate = std::min(decimate, config::ADAPT_DECIMATE_MED);
     } else {
-        return std::max(base, config::ADAPT_DECIMATE_LOW);
+        decimate = std::min(decimate, config::ADAPT_DECIMATE_HIGH);
     }
+
+    return std::max(1, decimate);
 }
 
 bool FrameProcessor::shouldProcessTag(int id) {
@@ -169,9 +175,13 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         }
     }
 
-    // Create visualization (grayscale base with color overlays)
+    // Create visualization on top of the color frame for clarity
     cv::Mat vis;
-    cv::cvtColor(grayProc, vis, cv::COLOR_GRAY2BGR);
+    if (frame.channels() == 3) {
+        vis = frame.clone();
+    } else {
+        cv::cvtColor(frame, vis, cv::COLOR_GRAY2BGR);
+    }
 
     std::set<int> visibleIds;
     std::vector<TagData> tagDataList;

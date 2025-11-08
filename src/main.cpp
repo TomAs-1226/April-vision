@@ -172,6 +172,8 @@ public:
                               cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 2);
 
                     displayFrame = result;
+                } else {
+                    displayFrame = frameToProcess;
                 }
             }
 
@@ -233,28 +235,66 @@ private:
     void startCamera() {
         if (cameraRunning_) return;
 
-        cap_ = std::make_unique<cv::VideoCapture>(config::CAM_IDX);
+        std::unique_ptr<cv::VideoCapture> newCap;
 
-        if (!cap_->isOpened()) {
+#ifdef _WIN32
+        newCap = std::make_unique<cv::VideoCapture>(config::CAM_IDX, cv::CAP_MSMF);
+        if (!newCap->isOpened()) {
+            newCap = std::make_unique<cv::VideoCapture>(config::CAM_IDX, cv::CAP_DSHOW);
+        }
+#else
+        newCap = std::make_unique<cv::VideoCapture>(config::CAM_IDX);
+#endif
+
+        if (!newCap || !newCap->isOpened()) {
             std::cerr << "[VisionApp] Failed to open camera " << config::CAM_IDX << std::endl;
             return;
         }
 
-        cap_->set(cv::CAP_PROP_FRAME_WIDTH, 640);
-        cap_->set(cv::CAP_PROP_FRAME_HEIGHT, 480);
-        cap_->set(cv::CAP_PROP_FPS, config::CAPTURE_FPS);
-        cap_->set(cv::CAP_PROP_BUFFERSIZE, 1);
+        if (config::CAM_FORCE_MJPEG) {
+            newCap->set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M', 'J', 'P', 'G'));
+        }
+
+        newCap->set(cv::CAP_PROP_FRAME_WIDTH, 640);
+        newCap->set(cv::CAP_PROP_FRAME_HEIGHT, 480);
+        newCap->set(cv::CAP_PROP_FPS, config::CAPTURE_FPS);
+        newCap->set(cv::CAP_PROP_BUFFERSIZE, 1);
 
         {
             std::lock_guard<std::mutex> lock(frameMutex_);
             latestFrame_.release();
         }
 
+        int warmCount = 0;
+        cv::Mat warmFrame;
+        for (int i = 0; i < config::CAM_WARMUP_FRAMES; ++i) {
+            if (!newCap->read(warmFrame) || warmFrame.empty()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(config::CAM_WARMUP_DELAY_MS));
+                continue;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(frameMutex_);
+                latestFrame_ = warmFrame;
+            }
+
+            ++warmCount;
+
+            if (config::CAM_WARMUP_DELAY_MS > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(config::CAM_WARMUP_DELAY_MS));
+            }
+        }
+
+        cap_ = std::move(newCap);
         cameraRunning_ = true;
         useCamera_ = true;
         captureThread_ = std::thread(&VisionApp::captureLoop, this);
 
-        std::cout << "[VisionApp] Camera started" << std::endl;
+        std::cout << "[VisionApp] Camera started";
+        if (warmCount > 0) {
+            std::cout << " | warm-up frames=" << warmCount;
+        }
+        std::cout << std::endl;
     }
 
     void stopCamera() {
@@ -283,7 +323,12 @@ private:
     void captureLoop() {
         while (cameraRunning_ && cap_ && cap_->isOpened()) {
             cv::Mat frame;
-            if (cap_->read(frame)) {
+            if (!cap_->read(frame) || frame.empty()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+
+            {
                 std::lock_guard<std::mutex> lock(frameMutex_);
                 latestFrame_ = frame;
             }

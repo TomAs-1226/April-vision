@@ -19,12 +19,16 @@ inline constexpr double DEFAULT_TAG_SIZE_M = 0.1524;
 inline constexpr int CAM_IDX = 0;
 inline constexpr int CAPTURE_FPS = 60;
 inline constexpr int FRAME_UI_MS = 12;
+inline constexpr int CAM_WARMUP_FRAMES = 12;
+inline constexpr int CAM_WARMUP_DELAY_MS = 8;
+inline constexpr bool CAM_FORCE_MJPEG = true;
 
 // Performance tuning
 inline constexpr int DETECTION_RATE_HZ = 60;
 inline constexpr int GUI_RATE_HZ = 20;
 inline constexpr int MIN_DET_RATE = 8;
 inline constexpr int MAX_DET_RATE = 120;
+inline constexpr int DETECTOR_THREADS = 0; // 0 => auto-detect
 
 // NetworkTables / UDP
 inline constexpr const char* NT_SERVER = "10.0.0.2";
