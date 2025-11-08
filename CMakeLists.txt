@@ -65,6 +65,61 @@ target_link_libraries(${PROJECT_NAME}
         Eigen3::Eigen
 )
 
+#
+# Windows runtime dependency staging
+# STATUS_DLL_NOT_FOUND (0xC0000135) occurs when the executable cannot locate
+# dependent DLLs such as OpenCV or AprilTag at runtime.  In the developer
+# environment these DLLs typically live inside the vcpkg or AprilTag build
+# directories and are not copied next to the built executable by default.
+# Ensure we stage any discovered DLLs into the target output directory so the
+# binary starts successfully without requiring manual copying.
+#
+if(WIN32)
+    # Helper to register a copy command only if the DLL exists at configure time.
+    function(_apriltag_stage_dll dll_path)
+        if(EXISTS "${dll_path}")
+            add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${dll_path}"
+                    "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+                    VERBATIM)
+        endif()
+    endfunction()
+
+    # Try to gather OpenCV runtime DLLs.  vcpkg keeps them in "bin" alongside
+    # the "lib" directory exposed through OpenCV's config.
+    set(_opencv_bin_dir "")
+    if(DEFINED OpenCV_BIN_DIR)
+        set(_opencv_bin_dir "${OpenCV_BIN_DIR}")
+    elseif(OpenCV_DIR)
+        get_filename_component(_opencv_share_dir "${OpenCV_DIR}" DIRECTORY)
+        get_filename_component(_opencv_root_dir "${_opencv_share_dir}" DIRECTORY)
+        set(_opencv_bin_dir "${_opencv_root_dir}/bin")
+    endif()
+
+    if(_opencv_bin_dir AND EXISTS "${_opencv_bin_dir}")
+        file(GLOB _opencv_runtime_dlls "${_opencv_bin_dir}/*.dll")
+        list(REMOVE_DUPLICATES _opencv_runtime_dlls)
+        foreach(_dll ${_opencv_runtime_dlls})
+            _apriltag_stage_dll("${_dll}")
+        endforeach()
+    endif()
+
+    # Gather AprilTag runtime DLLs from the configured library directory.
+    set(_apriltag_candidate_dirs
+            "${APRILTAG_LIB_DIR}"
+            "${APRILTAG_LIB_DIR}/Release"
+            "${APRILTAG_LIB_DIR}/Debug")
+    foreach(_dir ${_apriltag_candidate_dirs})
+        if(EXISTS "${_dir}")
+            file(GLOB _apriltag_runtime_dlls "${_dir}/*.dll")
+            foreach(_dll ${_apriltag_runtime_dlls})
+                _apriltag_stage_dll("${_dll}")
+            endforeach()
+        endif()
+    endforeach()
+endif()
+
 # Find AprilTag library
 find_library(APRILTAG_LIB
         NAMES apriltag
