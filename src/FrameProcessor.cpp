@@ -334,10 +334,13 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         for (double t : processTimeHist_) avgMs += t;
         avgMs /= processTimeHist_.size();
 
-        if (avgMs > config::PROCESS_TIME_HIGH_MS && detectionRate_ > config::MIN_DET_RATE) {
-            detectionRate_ = std::max(config::MIN_DET_RATE, detectionRate_ * 0.85);
-        } else if (avgMs < config::PROCESS_TIME_LOW_MS && detectionRate_ < config::MAX_DET_RATE) {
-            detectionRate_ = std::min(config::MAX_DET_RATE, detectionRate_ * 1.08);
+        const double minRate = static_cast<double>(config::MIN_DET_RATE);
+        const double maxRate = static_cast<double>(config::MAX_DET_RATE);
+
+        if (avgMs > config::PROCESS_TIME_HIGH_MS && detectionRate_ > minRate) {
+            detectionRate_ = std::max(minRate, detectionRate_ * 0.85);
+        } else if (avgMs < config::PROCESS_TIME_LOW_MS && detectionRate_ < maxRate) {
+            detectionRate_ = std::min(maxRate, detectionRate_ * 1.08);
         }
 
         processTimeHist_.clear();
