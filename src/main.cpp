@@ -9,6 +9,7 @@
 #include <chrono>
 #include <fstream>
 #include <sstream>
+#include <iomanip>
 
 // Undefine Windows macros
 #ifdef max

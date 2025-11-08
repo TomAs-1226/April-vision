@@ -112,4 +112,7 @@ private:
     double emaPosAlpha_;
     double emaPoseAlpha_;
 
-    // B
+    // Buffers (reused to avoid allocation)
+    cv::Mat grayBuf_;
+    cv::Mat preprocessBuf_;
+};

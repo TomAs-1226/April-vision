@@ -3,6 +3,9 @@
 #include <iostream>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <sstream>
+#include <iomanip>
 
 // Undefine Windows macros
 #ifdef max
