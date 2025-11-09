@@ -1,0 +1,505 @@
+#include "FrameProcessor.h"
+#include "NetworkPublisher.h"
+#include "Config.h"
+#include "CameraTuner.h"   // <<< NEW
+#include <opencv2/opencv.hpp>
+#include <iostream>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <chrono>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
+#include <algorithm>
+#include <string>
+
+// Undefine Windows macros
+#ifdef max
+#undef max
+#endif
+#ifdef min
+#undef min
+#endif
+
+class VisionApp {
+public:
+    VisionApp()
+        : running_(false)
+        , cameraRunning_(false)
+        , useCamera_(false)
+        , currentImageIndex_(0)
+    {
+        processor_ = std::make_unique<FrameProcessor>();
+        publisher_ = std::make_shared<NetworkPublisher>(
+            config::NT_SERVER,
+            config::UDP_TARGET_IP,
+            config::UDP_TARGET_PORT
+        );
+        processor_->setNetworkPublisher(publisher_);
+
+        std::cout << "[VisionApp] Initialized" << std::endl;
+    }
+
+    ~VisionApp() {
+        stopCamera();
+        if (publisher_) {
+            publisher_->stop();
+        }
+    }
+
+    void run() {
+        running_ = true;
+
+        // Create control window
+        const std::string controlsWindow = "AprilTag Vision - Controls";
+        const std::string feedWindow = "AprilTag Vision - Feed";
+        cv::namedWindow(controlsWindow, cv::WINDOW_AUTOSIZE);
+        cv::namedWindow(feedWindow, cv::WINDOW_NORMAL);
+
+        struct TrackbarState {
+            std::atomic<int> decimate{config::DEFAULT_DECIMATE};
+            std::atomic<int> clahe{1};
+            std::atomic<int> gamma{125};
+            std::atomic<int> emaPos{static_cast<int>(config::EMA_ALPHA_POS * 100)};
+            std::atomic<int> emaPose{static_cast<int>(config::EMA_ALPHA_POSE * 100)};
+            std::atomic<int> publishNT{0};
+        } trackbars;
+
+        struct TrackbarParam {
+            const char* name;
+            const std::string* window;
+            std::atomic<int>* target;
+            int minValue;
+            int maxValue;
+        };
+
+        auto trackbarCallback = [](int pos, void* userdata) {
+            if (!userdata) return;
+            auto* param = static_cast<TrackbarParam*>(userdata);
+            if (!param->target) return;
+            const int clamped = std::clamp(pos, param->minValue, param->maxValue);
+            if (clamped != pos) {
+                cv::setTrackbarPos(param->name, *param->window, clamped);
+            }
+            param->target->store(clamped, std::memory_order_relaxed);
+        };
+
+        TrackbarParam decimateParam{"Decimate", &controlsWindow, &trackbars.decimate, 1, 5};
+        TrackbarParam claheParam{"CLAHE", &controlsWindow, &trackbars.clahe, 0, 1};
+        TrackbarParam gammaParam{"Gamma x100", &controlsWindow, &trackbars.gamma, 0, 300};
+        TrackbarParam emaPosParam{"EMA Pos x100", &controlsWindow, &trackbars.emaPos, 0, 100};
+        TrackbarParam emaPoseParam{"EMA Pose x100", &controlsWindow, &trackbars.emaPose, 0, 100};
+        TrackbarParam publishParam{"Publish NT", &controlsWindow, &trackbars.publishNT, 0, 1};
+
+        cv::createTrackbar(decimateParam.name, controlsWindow, nullptr, decimateParam.maxValue, trackbarCallback, &decimateParam);
+        cv::createTrackbar(claheParam.name, controlsWindow, nullptr, claheParam.maxValue, trackbarCallback, &claheParam);
+        cv::createTrackbar(gammaParam.name, controlsWindow, nullptr, gammaParam.maxValue, trackbarCallback, &gammaParam);
+        cv::createTrackbar(emaPosParam.name, controlsWindow, nullptr, emaPosParam.maxValue, trackbarCallback, &emaPosParam);
+        cv::createTrackbar(emaPoseParam.name, controlsWindow, nullptr, emaPoseParam.maxValue, trackbarCallback, &emaPoseParam);
+        cv::createTrackbar(publishParam.name, controlsWindow, nullptr, publishParam.maxValue, trackbarCallback, &publishParam);
+
+        cv::setTrackbarPos(decimateParam.name, controlsWindow, trackbars.decimate.load(std::memory_order_relaxed));
+        cv::setTrackbarPos(claheParam.name, controlsWindow, trackbars.clahe.load(std::memory_order_relaxed));
+        cv::setTrackbarPos(gammaParam.name, controlsWindow, trackbars.gamma.load(std::memory_order_relaxed));
+        cv::setTrackbarPos(emaPosParam.name, controlsWindow, trackbars.emaPos.load(std::memory_order_relaxed));
+        cv::setTrackbarPos(emaPoseParam.name, controlsWindow, trackbars.emaPose.load(std::memory_order_relaxed));
+        cv::setTrackbarPos(publishParam.name, controlsWindow, trackbars.publishNT.load(std::memory_order_relaxed));
+
+        std::cout << "\n=== Controls ===" << std::endl;
+        std::cout << "C - Toggle camera mode" << std::endl;
+        std::cout << "O - Open images" << std::endl;
+        std::cout << "L - Load camera intrinsics" << std::endl;
+        std::cout << "T - Set tag size (meters)" << std::endl;
+        std::cout << "N/P - Previous/Next image (when not in camera mode)" << std::endl;
+        std::cout << "Q/ESC - Quit" << std::endl;
+        std::cout << "================\n" << std::endl;
+
+        publisher_->start();
+
+        startCamera();
+
+        cv::Mat displayFrame;
+        auto lastFrameTime = std::chrono::steady_clock::now();
+        const double targetFrameTime = 1.0 / config::GUI_RATE_HZ;
+
+        while (running_) {
+            // Update processor settings from trackbars
+            const int decimateVal = trackbars.decimate.load(std::memory_order_relaxed);
+            const int claheVal = trackbars.clahe.load(std::memory_order_relaxed);
+            const int gammaVal = trackbars.gamma.load(std::memory_order_relaxed);
+            const int emaPosVal = trackbars.emaPos.load(std::memory_order_relaxed);
+            const int emaPoseVal = trackbars.emaPose.load(std::memory_order_relaxed);
+            const int publishNTVal = trackbars.publishNT.load(std::memory_order_relaxed);
+
+            processor_->setDecimate(std::max(1, decimateVal));
+            processor_->enableCLAHE(claheVal > 0);
+            processor_->setGamma(std::max(0.1, gammaVal / 100.0));
+            processor_->setEMAAlpha(
+                std::max(0.01, emaPosVal / 100.0),
+                std::max(0.01, emaPoseVal / 100.0)
+            );
+            publisher_->enableNetworkTables(publishNTVal > 0);
+
+            // Get frame to process
+            cv::Mat frameToProcess;
+            {
+                std::lock_guard<std::mutex> lock(frameMutex_);
+                if (!latestFrame_.empty()) {
+                    frameToProcess = latestFrame_.clone();
+                }
+            }
+
+            if (!frameToProcess.empty()) {
+                ProcessingStats stats;
+                cv::Mat result = processor_->processFrame(frameToProcess, stats);
+
+                if (!result.empty()) {
+                    // Add stats overlay
+                    std::ostringstream oss;
+                    oss << "Det Rate: " << std::fixed << std::setprecision(1) << stats.detectionRateHz << " Hz | "
+                        << "Proc: " << std::setprecision(1) << stats.avgProcessTimeMs << " ms | "
+                        << "Tags: " << stats.tagCount << " | "
+                        << "Blur: " << std::setprecision(0) << stats.blurVariance;
+
+                    std::string statsText = oss.str();
+                    cv::putText(result, statsText, cv::Point(10, 30),
+                              cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 2);
+
+                    displayFrame = result;
+                } else {
+                    displayFrame = frameToProcess;
+                }
+            }
+
+            // Display frame
+            cv::Mat frameToShow = displayFrame;
+            if (frameToShow.empty()) {
+                frameToShow = cv::Mat(480, 640, CV_8UC3, cv::Scalar(32, 32, 32));
+                const bool cameraActive = cameraRunning_.load(std::memory_order_relaxed);
+                const std::string message = cameraActive
+                    ? "Waiting for camera frames..."
+                    : "Press C to start camera or load images";
+                cv::putText(frameToShow, message, cv::Point(40, 240),
+                            cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 200, 255), 2);
+            }
+
+            cv::imshow(feedWindow, frameToShow);
+
+            // Handle keyboard input
+            int key = cv::waitKey(1);
+            if (key == 'q' || key == 'Q' || key == 27) { // Q or ESC
+                running_ = false;
+            } else if (key == 'c' || key == 'C') {
+                toggleCamera();
+            } else if (key == 'o' || key == 'O') {
+                openImages();
+            } else if (key == 'l' || key == 'L') {
+                loadIntrinsics();
+            } else if (key == 't' || key == 'T') {
+                setTagSize();
+            } else if (key == 'n' || key == 'N') {
+                nextImage();
+            } else if (key == 'p' || key == 'P') {
+                previousImage();
+            }
+
+            // Rate limiting
+            auto now = std::chrono::steady_clock::now();
+            double elapsed = std::chrono::duration<double>(now - lastFrameTime).count();
+            if (elapsed < targetFrameTime) {
+                std::this_thread::sleep_for(
+                    std::chrono::duration<double>(targetFrameTime - elapsed)
+                );
+            }
+            lastFrameTime = std::chrono::steady_clock::now();
+        }
+
+        cv::destroyAllWindows();
+    }
+
+private:
+    void toggleCamera() {
+        if (cameraRunning_) {
+            stopCamera();
+        } else {
+            startCamera();
+        }
+    }
+
+    void startCamera() {
+        if (cameraRunning_) return;
+
+        // ---- NEW: use CameraTuner for backend + exposure sanity on Windows ----
+        camtuner::Settings cs;
+        cs.index  = config::CAM_IDX;
+        cs.width  = 640;
+        cs.height = 480;
+        cs.fps    = config::CAPTURE_FPS;
+
+#ifdef _WIN32
+        // Try DSHOW first, then MSMF (exposure controls are often better on DSHOW).
+        cs.backendOrder = { cv::CAP_DSHOW, cv::CAP_MSMF };
+        // Start with Auto Exposure ON; if still dark, the tuner flips once.
+        cs.useAutoExposure = true;
+        // If you prefer manual, flip these two lines instead:
+        // cs.useAutoExposure = false; cs.manualExposure = -6.0; // ~1/64 s on Windows
+#else
+        // Non-Windows: let OpenCV choose the platform default backend
+        cs.backendOrder = { 0 };
+#endif
+        cs.warmupFrames = config::CAM_WARMUP_FRAMES;
+
+        auto opened = camtuner::openAndTune(cs);
+        if (!opened.ok || !opened.cap.isOpened()) {
+            std::cerr << "[VisionApp] Failed to open/tune camera " << config::CAM_IDX << std::endl;
+            for (auto& line : opened.log) std::cerr << "  prop " << line << "\n";
+            return;
+        }
+
+        // Force MJPEG if requested
+        if (config::CAM_FORCE_MJPEG) {
+            opened.cap.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M','J','P','G'));
+        }
+
+        // Minimal internal buffering for fresh frames
+        opened.cap.set(cv::CAP_PROP_BUFFERSIZE, 1);
+
+        // Prime a few frames into our shared buffer so UI shows something immediately
+        {
+            std::lock_guard<std::mutex> lock(frameMutex_);
+            latestFrame_.release();
+        }
+        cv::Mat warm;
+        int warmCount = 0;
+        for (int i = 0; i < cs.warmupFrames; ++i) {
+            if (!opened.cap.read(warm) || warm.empty()) continue;
+            {
+                std::lock_guard<std::mutex> lock(frameMutex_);
+                latestFrame_ = warm;
+            }
+            ++warmCount;
+            if (config::CAM_WARMUP_DELAY_MS > 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(config::CAM_WARMUP_DELAY_MS));
+            }
+        }
+
+        // Move the tuned capture into our member and spawn the loop
+        cap_ = std::make_unique<cv::VideoCapture>(std::move(opened.cap));
+        cameraRunning_ = true;
+        useCamera_ = true;
+        captureThread_ = std::thread(&VisionApp::captureLoop, this);
+
+        std::cout << "[VisionApp] Camera started";
+        if (warmCount > 0) std::cout << " | warm-up frames=" << warmCount;
+        std::cout << std::endl;
+
+        // (Optional) print what actually stuck
+        std::cerr << "[Camera] Properties after tuning:\n";
+        for (auto& line : opened.log) std::cerr << "  prop " << line << "\n";
+    }
+
+    void stopCamera() {
+        if (!cameraRunning_) return;
+
+        cameraRunning_ = false;
+        useCamera_ = false;
+
+        if (captureThread_.joinable()) {
+            captureThread_.join();
+        }
+
+        if (cap_) {
+            cap_->release();
+            cap_.reset();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(frameMutex_);
+            latestFrame_.release();
+        }
+
+        std::cout << "[VisionApp] Camera stopped" << std::endl;
+    }
+
+    void captureLoop() {
+        while (cameraRunning_ && cap_ && cap_->isOpened()) {
+            cv::Mat frame;
+            if (!cap_->read(frame) || frame.empty()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                continue;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(frameMutex_);
+                latestFrame_ = frame;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    void openImages() {
+        stopCamera();
+
+        std::cout << "[VisionApp] Enter image paths (comma-separated): ";
+        std::string input;
+        std::getline(std::cin, input);
+
+        imageFiles_.clear();
+        std::istringstream iss(input);
+        std::string path;
+
+        while (std::getline(iss, path, ',')) {
+            // Trim whitespace
+            path.erase(0, path.find_first_not_of(" \t"));
+            path.erase(path.find_last_not_of(" \t") + 1);
+
+            if (!path.empty()) {
+                imageFiles_.push_back(path);
+            }
+        }
+
+        if (!imageFiles_.empty()) {
+            currentImageIndex_ = 0;
+            loadCurrentImage();
+            useCamera_ = false;
+            std::cout << "[VisionApp] Loaded " << imageFiles_.size() << " images" << std::endl;
+        }
+    }
+
+    void loadCurrentImage() {
+        if (imageFiles_.empty()) return;
+
+        cv::Mat img = cv::imread(imageFiles_[currentImageIndex_]);
+        if (!img.empty()) {
+            std::lock_guard<std::mutex> lock(frameMutex_);
+            latestFrame_ = img;
+        } else {
+            std::cerr << "[VisionApp] Failed to load: " << imageFiles_[currentImageIndex_] << std::endl;
+        }
+    }
+
+    void nextImage() {
+        if (imageFiles_.empty() || useCamera_) return;
+
+        currentImageIndex_ = (currentImageIndex_ + 1) % imageFiles_.size();
+        loadCurrentImage();
+    }
+
+    void previousImage() {
+        if (imageFiles_.empty() || useCamera_) return;
+
+        currentImageIndex_ = (currentImageIndex_ == 0) ?
+            imageFiles_.size() - 1 : currentImageIndex_ - 1;
+        loadCurrentImage();
+    }
+
+    void loadIntrinsics() {
+        std::cout << "[VisionApp] Enter intrinsics JSON path: ";
+        std::string path;
+        std::getline(std::cin, path);
+
+        // Trim whitespace
+        path.erase(0, path.find_first_not_of(" \t"));
+        path.erase(path.find_last_not_of(" \t") + 1);
+
+        if (path.empty()) return;
+
+        try {
+            std::ifstream file(path);
+            if (!file.is_open()) {
+                std::cerr << "[VisionApp] Cannot open: " << path << std::endl;
+                return;
+            }
+
+            // Simple JSON parsing (for production, use a proper JSON library like nlohmann/json)
+            std::string line, content;
+            while (std::getline(file, line)) {
+                content += line;
+            }
+
+            // Extract fx, fy, cx, cy (very basic parsing)
+            double fx = 0, fy = 0, cx = 0, cy = 0;
+
+            size_t fxPos = content.find("\"fx\"");
+            if (fxPos != std::string::npos) {
+                sscanf(content.c_str() + fxPos, "\"fx\": %lf", &fx);
+            }
+
+            size_t fyPos = content.find("\"fy\"");
+            if (fyPos != std::string::npos) {
+                sscanf(content.c_str() + fyPos, "\"fy\": %lf", &fy);
+            } else {
+                fy = fx;
+            }
+
+            size_t cxPos = content.find("\"cx\"");
+            if (cxPos != std::string::npos) {
+                sscanf(content.c_str() + cxPos, "\"cx\": %lf", &cx);
+            }
+
+            size_t cyPos = content.find("\"cy\"");
+            if (cyPos != std::string::npos) {
+                sscanf(content.c_str() + cyPos, "\"cy\": %lf", &cy);
+            }
+
+            if (fx > 0 && fy > 0 && cx > 0 && cy > 0) {
+                cv::Mat K = (cv::Mat_<double>(3, 3) << fx, 0, cx, 0, fy, cy, 0, 0, 1);
+                cv::Mat D = cv::Mat::zeros(5, 1, CV_64F);
+
+                processor_->setCameraMatrix(K, D);
+                std::cout << "[VisionApp] Loaded intrinsics from " << path << std::endl;
+            } else {
+                std::cerr << "[VisionApp] Invalid intrinsics data" << std::endl;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "[VisionApp] Error loading intrinsics: " << e.what() << std::endl;
+        }
+    }
+
+    void setTagSize() {
+        std::cout << "[VisionApp] Enter tag size in meters: ";
+        double size;
+        std::cin >> size;
+        std::cin.ignore();
+
+        if (size > 0.0) {
+            processor_->setTagSize(size);
+            std::cout << "[VisionApp] Tag size set to " << size << " meters" << std::endl;
+        }
+    }
+
+    std::unique_ptr<FrameProcessor> processor_;
+    std::shared_ptr<NetworkPublisher> publisher_;
+
+    std::atomic<bool> running_;
+    std::atomic<bool> cameraRunning_;
+    std::atomic<bool> useCamera_;
+
+    std::unique_ptr<cv::VideoCapture> cap_;
+    std::thread captureThread_;
+
+    cv::Mat latestFrame_;
+    std::mutex frameMutex_;
+
+    std::vector<std::string> imageFiles_;
+    size_t currentImageIndex_;
+};
+
+int main(int argc, char** argv) {
+    std::cout << "==================================" << std::endl;
+    std::cout << "AprilTag Vision System for FRC" << std::endl;
+    std::cout << "C++ High-Performance Edition" << std::endl;
+    std::cout << "==================================" << std::endl;
+
+    try {
+        VisionApp app;
+        app.run();
+    } catch (const std::exception& e) {
+        std::cerr << "Fatal error: " << e.what() << std::endl;
+        return 1;
+    }
+
+    return 0;
+}
