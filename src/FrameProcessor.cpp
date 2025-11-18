@@ -97,6 +97,7 @@ FrameProcessor::FrameProcessor()
 {
     detector_ = std::make_unique<Detector>();
     poseEstimator_ = std::make_unique<PoseEstimator>();
+    arucoHelper_ = std::make_unique<ArucoPoseHelper>();
 
     clahe_ = cv::createCLAHE(config::CLAHE_CLIP_LIMIT,
                              cv::Size(config::CLAHE_TILE_SIZE, config::CLAHE_TILE_SIZE));
@@ -269,18 +270,43 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
             auto poseResult = poseEstimator_->solvePose(corners, tagSizeM_,
                                                         cameraMatrix_, distCoeffs_);
             if (poseResult) {
+                cv::Vec3d fusedTvec = poseResult->tvec;
+                cv::Vec3d fusedRvec = poseResult->rvec;
+                double fusedError = poseResult->reprojError;
+
+                // Optional ArUco refinement to stabilize pose estimates at long range
+                cv::Vec3d arucoR, arucoT;
+                double arucoErr = 0.0;
+                if (arucoHelper_ && arucoHelper_->estimatePose(corners, tagSizeM_,
+                                                               cameraMatrix_, distCoeffs_,
+                                                               arucoR, arucoT, arucoErr)) {
+                    const double wApril = 1.0 / std::max(1e-3, fusedError);
+                    const double wAruco = 1.0 / std::max(1e-3, arucoErr);
+                    const double sumW = wApril + wAruco;
+                    const double weightApril = wApril / sumW;
+                    const double weightAruco = wAruco / sumW;
+
+                    fusedTvec = cv::Vec3d(
+                        weightApril * fusedTvec[0] + weightAruco * arucoT[0],
+                        weightApril * fusedTvec[1] + weightAruco * arucoT[1],
+                        weightApril * fusedTvec[2] + weightAruco * arucoT[2]
+                    );
+                    fusedRvec = PoseEstimator::blendRvecs(fusedRvec, arucoR, weightApril);
+                    fusedError = (weightApril * fusedError) + (weightAruco * arucoErr);
+                }
+
                 // Smooth position
                 auto& posSmooth = posSmoothers_[det.id];
                 if (!posSmooth || std::abs(posSmooth->getAlpha() - emaPosAlpha_) > 1e-9)
                     posSmooth = std::make_unique<EMASmoother>(emaPosAlpha_);
-                Eigen::Vector3d tvecE(poseResult->tvec[0], poseResult->tvec[1], poseResult->tvec[2]);
+                Eigen::Vector3d tvecE(fusedTvec[0], fusedTvec[1], fusedTvec[2]);
                 Eigen::VectorXd sPos = posSmooth->update(tvecE);
 
                 // Smooth orientation
                 auto& poseSmooth = poseSmoothers_[det.id];
                 if (!poseSmooth || std::abs(poseSmooth->getAlpha() - emaPoseAlpha_) > 1e-9)
                     poseSmooth = std::make_unique<EMASmoother>(emaPoseAlpha_);
-                Eigen::Vector3d rvecE(poseResult->rvec[0], poseResult->rvec[1], poseResult->rvec[2]);
+                Eigen::Vector3d rvecE(fusedRvec[0], fusedRvec[1], fusedRvec[2]);
                 Eigen::VectorXd sRot = poseSmooth->update(rvecE);
 
                 // Median filter if enabled
@@ -301,7 +327,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
                     rvec = cv::Vec3d(sRot(0), sRot(1), sRot(2));
                 }
 
-                reprojErr = poseResult->reprojError;
+                reprojErr = fusedError;
 
                 TagData td;
                 td.id = det.id;
@@ -348,18 +374,20 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
     // Store current frame for optical flow
     gray.copyTo(prevGray_);
 
+    auto t1 = std::chrono::high_resolution_clock::now();
+    const double procTimeMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+
     // Publish
     if (publisher_ && !tagDataList.empty()) {
         VisionPayload payload;
         payload.timestamp = std::chrono::duration<double>(
             std::chrono::system_clock::now().time_since_epoch()).count();
+        payload.pipelineLatencyMs = procTimeMs;
         payload.tags = tagDataList;
         publisher_->publish(payload);
     }
 
     // Stats
-    auto t1 = std::chrono::high_resolution_clock::now();
-    const double procTimeMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
     processTimeHist_.push_back(procTimeMs);
     if (processTimeHist_.size() > 30) processTimeHist_.pop_front();

@@ -8,6 +8,13 @@
 #include <atomic>
 #include <deque>
 #include <opencv2/opencv.hpp>
+#include <array>
+
+#ifdef USE_NTCORE
+#include <networktables/NetworkTableInstance.h>
+#include <networktables/NetworkTable.h>
+#include <networktables/NetworkTableEntry.h>
+#endif
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -32,6 +39,7 @@ struct TagData {
 
 struct VisionPayload {
     double timestamp;
+    double pipelineLatencyMs;
     std::vector<TagData> tags;
 };
 
@@ -56,6 +64,11 @@ private:
     void publishLoop();
     bool initUDP();
     void sendUDP(const std::string& json);
+    void publishNetworkTables(const VisionPayload& payload);
+
+#ifdef USE_NTCORE
+    void configureNetworkTables();
+#endif
 
     std::string ntServer_;
     std::string udpIp_;
@@ -73,6 +86,26 @@ private:
     int udpSocket_;
     struct sockaddr_in udpAddr_;
     bool udpInitialized_;
+
+#ifdef USE_NTCORE
+    nt::NetworkTableInstance ntInstance_;
+    std::shared_ptr<nt::NetworkTable> visionTable_;
+    nt::NetworkTableEntry timestampEntry_;
+    nt::NetworkTableEntry latencyEntry_;
+    nt::NetworkTableEntry idsEntry_;
+    nt::NetworkTableEntry txEntry_;
+    nt::NetworkTableEntry tyEntry_;
+    nt::NetworkTableEntry taEntry_;
+    nt::NetworkTableEntry xyzEntry_;
+    nt::NetworkTableEntry rpyEntry_;
+    nt::NetworkTableEntry distanceEntry_;
+    nt::NetworkTableEntry bestIdEntry_;
+    nt::NetworkTableEntry bestPoseEntry_;
+    nt::NetworkTableEntry bestRpyEntry_;
+    nt::NetworkTableEntry bestDistanceEntry_;
+    nt::NetworkTableEntry connectedEntry_;
+    bool ntConfigured_ = false;
+#endif
 
     static constexpr size_t MAX_QUEUE_SIZE = 8;
 };

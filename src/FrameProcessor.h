@@ -2,6 +2,7 @@
 
 #include "Detector.h"
 #include "PoseEstimator.h"
+#include "ArucoPoseHelper.h"
 #include "Tracker.h"
 #include "NetworkPublisher.h"
 #include <opencv2/opencv.hpp>
@@ -70,6 +71,7 @@ private:
     // Members
     std::unique_ptr<Detector> detector_;
     std::unique_ptr<PoseEstimator> poseEstimator_;
+    std::unique_ptr<ArucoPoseHelper> arucoHelper_;
     std::shared_ptr<NetworkPublisher> publisher_;
 
     cv::Mat cameraMatrix_;

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <algorithm>
 #include <utility>
+#include <Eigen/Geometry>
 
 // Define M_PI for MSVC
 #ifndef M_PI
@@ -252,4 +253,44 @@ std::vector<cv::Point2f> PoseEstimator::orderCorners(const std::vector<cv::Point
     }
 
     return ordered;
+}
+
+cv::Vec3d PoseEstimator::blendRvecs(const cv::Vec3d& primary,
+                                    const cv::Vec3d& secondary,
+                                    double primaryWeight)
+{
+    const double clampedWeight = std::clamp(primaryWeight, 0.0, 1.0);
+    const double t = 1.0 - clampedWeight;
+
+    cv::Mat R1, R2;
+    cv::Rodrigues(primary, R1);
+    cv::Rodrigues(secondary, R2);
+
+    Eigen::Matrix3d eR1;
+    Eigen::Matrix3d eR2;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            eR1(r, c) = R1.at<double>(r, c);
+            eR2(r, c) = R2.at<double>(r, c);
+        }
+    }
+
+    Eigen::Quaterniond q1(eR1);
+    Eigen::Quaterniond q2(eR2);
+    q1.normalize();
+    q2.normalize();
+    Eigen::Quaterniond qBlend = q1.slerp(t, q2);
+    qBlend.normalize();
+
+    Eigen::Matrix3d eBlend = qBlend.toRotationMatrix();
+    cv::Mat RBlend(3, 3, CV_64F);
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            RBlend.at<double>(r, c) = eBlend(r, c);
+        }
+    }
+
+    cv::Vec3d out;
+    cv::Rodrigues(RBlend, out);
+    return out;
 }

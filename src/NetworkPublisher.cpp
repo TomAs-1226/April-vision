@@ -3,8 +3,15 @@
 #include <sstream>
 #include <iomanip>
 #include <cstring>
+#include <limits>
+#include <cmath>
+#include <algorithm>
 #ifndef _WIN32
 #include <fcntl.h>
+#endif
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
 #endif
 
 NetworkPublisher::NetworkPublisher(const std::string& ntServer,
@@ -38,6 +45,12 @@ NetworkPublisher::~NetworkPublisher() {
         close(udpSocket_);
 #endif
     }
+
+#ifdef USE_NTCORE
+    if (ntConfigured_) {
+        ntInstance_.StopClient();
+    }
+#endif
 }
 
 void NetworkPublisher::start() {
@@ -118,6 +131,122 @@ void NetworkPublisher::sendUDP(const std::string& json) {
            (struct sockaddr*)&udpAddr_, sizeof(udpAddr_));
 }
 
+void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
+#ifdef USE_NTCORE
+    if (!ntEnabled_) {
+        return;
+    }
+
+    if (!ntConfigured_) {
+        configureNetworkTables();
+    }
+
+    if (!visionTable_) {
+        return;
+    }
+
+    timestampEntry_.SetDouble(payload.timestamp);
+    latencyEntry_.SetDouble(payload.pipelineLatencyMs);
+
+    std::vector<double> ids;
+    std::vector<double> txVals;
+    std::vector<double> tyVals;
+    std::vector<double> taVals;
+    std::vector<double> xyz;
+    std::vector<double> rpy;
+    std::vector<double> distances;
+
+    ids.reserve(payload.tags.size());
+    txVals.reserve(payload.tags.size());
+    tyVals.reserve(payload.tags.size());
+    taVals.reserve(payload.tags.size());
+    xyz.reserve(payload.tags.size() * 3);
+    rpy.reserve(payload.tags.size() * 3);
+    distances.reserve(payload.tags.size());
+
+    const TagData* best = nullptr;
+    double bestDist = std::numeric_limits<double>::max();
+
+    auto pushEuler = [&](const cv::Vec3d& rvec) {
+        cv::Matx33d R;
+        cv::Mat Rmat;
+        cv::Rodrigues(rvec, Rmat);
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                R(r, c) = Rmat.at<double>(r, c);
+            }
+        }
+        const double pitch = std::asin(std::clamp(-R(2, 0), -1.0, 1.0));
+        double roll;
+        double yaw;
+        if (std::abs(std::cos(pitch)) < 1e-6) {
+            yaw = 0.0;
+            roll = std::atan2(-R(0, 1), R(1, 1));
+        } else {
+            yaw = std::atan2(R(1, 0), R(0, 0));
+            roll = std::atan2(R(2, 1), R(2, 2));
+        }
+        rpy.push_back(roll * 180.0 / M_PI);
+        rpy.push_back(pitch * 180.0 / M_PI);
+        rpy.push_back(yaw * 180.0 / M_PI);
+    };
+
+    for (const auto& tag : payload.tags) {
+        ids.push_back(static_cast<double>(tag.id));
+        txVals.push_back(tag.tx_deg);
+        tyVals.push_back(tag.ty_deg);
+        taVals.push_back(tag.ta_percent);
+        xyz.push_back(tag.tvec[0]);
+        xyz.push_back(tag.tvec[1]);
+        xyz.push_back(tag.tvec[2]);
+        pushEuler(tag.rvec);
+
+        const double dist = std::sqrt(tag.tvec[0] * tag.tvec[0] +
+                                      tag.tvec[1] * tag.tvec[1] +
+                                      tag.tvec[2] * tag.tvec[2]);
+        distances.push_back(dist);
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = &tag;
+        }
+    }
+
+    idsEntry_.SetDoubleArray(ids);
+    txEntry_.SetDoubleArray(txVals);
+    tyEntry_.SetDoubleArray(tyVals);
+    taEntry_.SetDoubleArray(taVals);
+    xyzEntry_.SetDoubleArray(xyz);
+    rpyEntry_.SetDoubleArray(rpy);
+    distanceEntry_.SetDoubleArray(distances);
+
+    if (best) {
+        bestIdEntry_.SetDouble(static_cast<double>(best->id));
+        bestDistanceEntry_.SetDouble(bestDist);
+        bestPoseEntry_.SetDoubleArray({best->tvec[0], best->tvec[1], best->tvec[2]});
+
+        cv::Mat Rmat;
+        cv::Rodrigues(best->rvec, Rmat);
+        double roll = std::atan2(Rmat.at<double>(2, 1), Rmat.at<double>(2, 2));
+        double pitch = std::asin(std::clamp(-Rmat.at<double>(2, 0), -1.0, 1.0));
+        double yaw = std::atan2(Rmat.at<double>(1, 0), Rmat.at<double>(0, 0));
+        bestRpyEntry_.SetDoubleArray({
+            roll * 180.0 / M_PI,
+            pitch * 180.0 / M_PI,
+            yaw * 180.0 / M_PI
+        });
+    } else {
+        bestIdEntry_.SetDouble(-1.0);
+        bestDistanceEntry_.SetDouble(0.0);
+        bestPoseEntry_.SetDoubleArray({});
+        bestRpyEntry_.SetDoubleArray({});
+    }
+
+    connectedEntry_.SetBoolean(ntInstance_.IsConnected());
+#else
+    (void)payload;
+#endif
+}
+
 void NetworkPublisher::publishLoop() {
     while (running_) {
         VisionPayload payload;
@@ -138,6 +267,7 @@ void NetworkPublisher::publishLoop() {
             json << std::fixed << std::setprecision(4);
             json << "{";
             json << "\"timestamp\":" << payload.timestamp << ",";
+            json << "\"pipeline_ms\":" << payload.pipelineLatencyMs << ",";
             json << "\"tag_count\":" << payload.tags.size() << ",";
             json << "\"tagIDs\":\"";
             for (size_t i = 0; i < payload.tags.size(); i++) {
@@ -171,14 +301,42 @@ void NetworkPublisher::publishLoop() {
             }
 
             // TODO: NetworkTables publishing
-            // This requires linking against ntcore library
-            // For now, UDP fallback is implemented
-            if (ntEnabled_) {
-                // Would publish to NetworkTables here
-                // nt::NetworkTableInstance::GetDefault()...
-            }
+            publishNetworkTables(payload);
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(4));
     }
 }
+
+#ifdef USE_NTCORE
+void NetworkPublisher::configureNetworkTables() {
+    if (ntConfigured_) {
+        return;
+    }
+
+    ntInstance_ = nt::NetworkTableInstance::GetDefault();
+    ntInstance_.StopClient();
+    ntInstance_.StartClient4("AprilVision");
+    ntInstance_.SetServer(ntServer_.c_str(), nt::NetworkTableInstance::kDefaultPort4);
+
+    visionTable_ = ntInstance_.GetTable("vision");
+    timestampEntry_ = visionTable_->GetEntry("timestamp");
+    latencyEntry_ = visionTable_->GetEntry("pipeline_ms");
+    idsEntry_ = visionTable_->GetEntry("ids");
+    txEntry_ = visionTable_->GetEntry("tx");
+    tyEntry_ = visionTable_->GetEntry("ty");
+    taEntry_ = visionTable_->GetEntry("ta");
+    xyzEntry_ = visionTable_->GetEntry("pose_xyz");
+    rpyEntry_ = visionTable_->GetEntry("pose_rpy_deg");
+    distanceEntry_ = visionTable_->GetEntry("distance_m");
+    bestIdEntry_ = visionTable_->GetEntry("best/id");
+    bestPoseEntry_ = visionTable_->GetEntry("best/xyz");
+    bestRpyEntry_ = visionTable_->GetEntry("best/rpy_deg");
+    bestDistanceEntry_ = visionTable_->GetEntry("best/distance_m");
+    connectedEntry_ = visionTable_->GetEntry("connected");
+
+    ntConfigured_ = true;
+    std::cout << "[NetworkPublisher] NetworkTables client started at "
+              << ntServer_ << std::endl;
+}
+#endif
