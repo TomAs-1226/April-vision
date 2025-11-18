@@ -104,6 +104,13 @@ std::optional<std::tuple<double, double, double>> BoxTracker::get() const {
     return std::make_tuple(x_(0), x_(1), x_(2));
 }
 
+std::optional<Eigen::VectorXd> BoxTracker::getState() const {
+    if (!initialized_) {
+        return std::nullopt;
+    }
+    return x_;
+}
+
 double BoxTracker::secondsUnseen() const {
     return unseenCount_;
 }

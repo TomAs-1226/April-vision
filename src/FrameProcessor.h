@@ -13,6 +13,7 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <unordered_map>
 
 struct ProcessingStats {
     double detectionRateHz;
@@ -54,6 +55,9 @@ private:
 
     // Detection filtering
     bool shouldProcessTag(int id);
+    std::vector<Detection> detectWithStrategy(const cv::Mat& grayProc);
+    std::vector<cv::Rect> buildDynamicRois(int width, int height) const;
+    std::vector<Detection> mergeDetectionsById(const std::vector<Detection>& dets) const;
 
     // Tracking helpers
     void updateTracker(int id, const std::vector<cv::Point2f>& corners);
@@ -109,6 +113,7 @@ private:
     // Adaptive control
     double detectionRate_;
     std::deque<double> processTimeHist_;
+    size_t frameCounter_ = 0;
 
     // EMA alphas
     double emaPosAlpha_;

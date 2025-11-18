@@ -35,6 +35,15 @@ struct TagData {
     cv::Vec3d tvec;
     cv::Vec3d rvec;
     double reprojError;
+    std::array<cv::Point2f, 4> corners;
+    double skewDeg;
+    double shortSidePx;
+    double longSidePx;
+    double boundingWidthPx;
+    double boundingHeightPx;
+    double areaPx;
+    double poseAmbiguity;
+    double decisionMargin;
 };
 
 struct VisionPayload {
@@ -90,6 +99,7 @@ private:
 #ifdef USE_NTCORE
     nt::NetworkTableInstance ntInstance_;
     std::shared_ptr<nt::NetworkTable> visionTable_;
+    std::shared_ptr<nt::NetworkTable> limelightTable_;
     nt::NetworkTableEntry timestampEntry_;
     nt::NetworkTableEntry latencyEntry_;
     nt::NetworkTableEntry idsEntry_;
@@ -104,6 +114,28 @@ private:
     nt::NetworkTableEntry bestRpyEntry_;
     nt::NetworkTableEntry bestDistanceEntry_;
     nt::NetworkTableEntry connectedEntry_;
+    nt::NetworkTableEntry ambiguityEntry_;
+    nt::NetworkTableEntry llTvEntry_;
+    nt::NetworkTableEntry llTidEntry_;
+    nt::NetworkTableEntry llTsEntry_;
+    nt::NetworkTableEntry llTlEntry_;
+    nt::NetworkTableEntry llTshortEntry_;
+    nt::NetworkTableEntry llTlongEntry_;
+    nt::NetworkTableEntry llThorEntry_;
+    nt::NetworkTableEntry llTvertEntry_;
+    nt::NetworkTableEntry llPoseAmbEntry_;
+    nt::NetworkTableEntry llTargetPoseCamEntry_;
+    nt::NetworkTableEntry llTargetPoseRobotEntry_;
+    nt::NetworkTableEntry llCameraPoseRobotEntry_;
+    nt::NetworkTableEntry llCameraPoseTargetEntry_;
+    nt::NetworkTableEntry llBotPoseTargetEntry_;
+#endif
+
+#ifdef USE_NTCORE
+    cv::Matx33d camToRobotR_;
+    cv::Matx33d robotToCamR_;
+    cv::Vec3d camToRobotT_;
+    cv::Vec3d robotToCamT_;
     bool ntConfigured_ = false;
 #endif
 

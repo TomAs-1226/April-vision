@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <sstream>
 #include <iomanip>
 
@@ -79,6 +80,36 @@ namespace {
 
         return (int)safePts.size();
     }
+
+    inline double edgeLength(const cv::Point2f& a, const cv::Point2f& b) {
+        return cv::norm(a - b);
+    }
+
+    inline double computeSkewDeg(const std::vector<cv::Point2f>& corners) {
+        if (corners.size() < 4) return 0.0;
+        const cv::Point2f diag = corners[2] - corners[0];
+        return std::atan2(diag.y, diag.x) * 180.0 / M_PI;
+    }
+
+    inline std::pair<double, double> computeSideExtents(const std::vector<cv::Point2f>& corners) {
+        if (corners.size() < 4) return {0.0, 0.0};
+        double shortSide = std::numeric_limits<double>::max();
+        double longSide = 0.0;
+        for (size_t i = 0; i < 4; ++i) {
+            size_t j = (i + 1) % 4;
+            const double len = edgeLength(corners[i], corners[j]);
+            shortSide = std::min(shortSide, len);
+            longSide = std::max(longSide, len);
+        }
+        if (!std::isfinite(shortSide)) shortSide = 0.0;
+        if (!std::isfinite(longSide)) longSide = 0.0;
+        return {shortSide, longSide};
+    }
+
+    inline cv::Rect clampRect(const cv::Rect& r, int width, int height) {
+        cv::Rect frame(0, 0, width, height);
+        return r & frame;
+    }
 } // namespace
 // --------------------------------------------------------------------------
 
@@ -92,6 +123,7 @@ FrameProcessor::FrameProcessor()
     , useBlacklist_(false)
     , sceneHasUnseen_(false)
     , detectionRate_(config::DETECTION_RATE_HZ)
+    , frameCounter_(0)
     , emaPosAlpha_(config::EMA_ALPHA_POS)
     , emaPoseAlpha_(config::EMA_ALPHA_POSE)
 {
@@ -176,6 +208,100 @@ bool FrameProcessor::shouldProcessTag(int id) {
     return true;
 }
 
+std::vector<Detection> FrameProcessor::detectWithStrategy(const cv::Mat& grayProc) {
+    ++frameCounter_;
+
+    const int width = grayProc.cols;
+    const int height = grayProc.rows;
+    std::vector<cv::Rect> rois = buildDynamicRois(width, height);
+    const bool needFullFrame = rois.empty() ||
+        (config::ROI_FULL_FRAME_INTERVAL > 0 &&
+         (frameCounter_ % static_cast<size_t>(config::ROI_FULL_FRAME_INTERVAL) == 0));
+
+    std::vector<Detection> detections;
+    if (!needFullFrame) {
+        std::vector<Detection> roiDets;
+        for (const auto& roi : rois) {
+            auto det = detector_->detectROI(grayProc, roi);
+            roiDets.insert(roiDets.end(), det.begin(), det.end());
+        }
+        detections = mergeDetectionsById(roiDets);
+    }
+
+    if (detections.empty()) {
+        detections = detector_->detect(grayProc);
+    }
+
+    return detections;
+}
+
+std::vector<cv::Rect> FrameProcessor::buildDynamicRois(int width, int height) const {
+    std::vector<std::pair<double, cv::Rect>> prioritized;
+    prioritized.reserve(trackers_.size());
+
+    for (const auto& [id, tracker] : trackers_) {
+        (void)id;
+        if (!tracker) continue;
+        auto state = tracker->get();
+        if (!state) continue;
+
+        double cx, cy, diag;
+        std::tie(cx, cy, diag) = *state;
+        diag = std::clamp(diag, config::MIN_SCALE_PX, config::MAX_SCALE_PX);
+
+        double margin = std::max(config::ROI_MIN_MARGIN_PX, diag * config::ROI_MARGIN_RATIO);
+        if (auto fullState = tracker->getState()) {
+            const double vx = (*fullState)(3);
+            const double vy = (*fullState)(4);
+            const double speed = std::sqrt(vx * vx + vy * vy);
+            margin += speed * config::ROI_VELOCITY_MARGIN_SCALE;
+        }
+        margin = std::clamp(margin, config::ROI_MIN_MARGIN_PX, config::ROI_MAX_MARGIN_PX);
+
+        const double halfSpan = (diag * 0.5) + margin;
+        const int x0 = static_cast<int>(std::floor(cx - halfSpan));
+        const int y0 = static_cast<int>(std::floor(cy - halfSpan));
+        const int size = static_cast<int>(std::ceil(halfSpan * 2.0));
+        cv::Rect roi(x0, y0, size, size);
+        roi = clampRect(roi, width, height);
+        if (roi.width <= 0 || roi.height <= 0) continue;
+        prioritized.emplace_back(halfSpan, roi);
+    }
+
+    std::sort(prioritized.begin(), prioritized.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+    if (prioritized.size() > static_cast<size_t>(config::ROI_MAX_COUNT)) {
+        prioritized.resize(config::ROI_MAX_COUNT);
+    }
+
+    std::vector<cv::Rect> rois;
+    rois.reserve(prioritized.size());
+    for (const auto& entry : prioritized) {
+        rois.push_back(entry.second);
+    }
+    return rois;
+}
+
+std::vector<Detection> FrameProcessor::mergeDetectionsById(const std::vector<Detection>& dets) const {
+    std::unordered_map<int, std::pair<double, Detection>> best;
+    for (const auto& det : dets) {
+        if (det.corners.size() < 4) continue;
+        const double diag = cv::norm(det.corners[0] - det.corners[2]);
+        const double score = det.decision_margin + 0.001 * diag;
+        auto it = best.find(det.id);
+        if (it == best.end() || score > it->second.first) {
+            best[det.id] = std::make_pair(score, det);
+        }
+    }
+
+    std::vector<Detection> out;
+    out.reserve(best.size());
+    for (const auto& kv : best) {
+        out.push_back(kv.second.second);
+    }
+    return out;
+}
+
 cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stats) {
     auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -214,7 +340,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
     detector_->setDecimate(static_cast<float>(decimate));
 
     // Detect tags ON THE SAME IMAGE we'll refine on
-    std::vector<Detection> detections = detector_->detect(grayProc);
+    std::vector<Detection> detections = detectWithStrategy(grayProc);
 
     // Filter detections
     std::vector<Detection> filtered;
@@ -333,6 +459,20 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
                 td.id = det.id;
                 td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta_percent;
                 td.tvec = tvec; td.rvec = rvec; td.reprojError = reprojErr;
+                td.poseAmbiguity = std::clamp(reprojErr / std::max(1e-3, config::POSE_AMBIGUITY_SCALE), 0.0, 1.0);
+                td.decisionMargin = det.decision_margin;
+                td.areaPx = area;
+                const auto [shortSide, longSide] = computeSideExtents(corners);
+                td.shortSidePx = shortSide;
+                td.longSidePx = longSide;
+                const cv::Rect bounds = cv::boundingRect(corners);
+                td.boundingWidthPx = static_cast<double>(bounds.width);
+                td.boundingHeightPx = static_cast<double>(bounds.height);
+                td.skewDeg = computeSkewDeg(corners);
+                for (size_t i = 0; i < td.corners.size(); ++i) {
+                    if (i < corners.size()) td.corners[i] = corners[i];
+                    else td.corners[i] = cv::Point2f();
+                }
                 tagDataList.push_back(td);
             }
         }

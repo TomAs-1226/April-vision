@@ -13,6 +13,7 @@ public:
     Eigen::VectorXd update(double cx, double cy, double s);
 
     std::optional<std::tuple<double, double, double>> get() const;
+    std::optional<Eigen::VectorXd> getState() const;
     double secondsUnseen() const;
     void resetUnseenTimer();
 
