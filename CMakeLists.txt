@@ -32,6 +32,19 @@ find_package(Eigen3 REQUIRED)
 set(APRILTAG_ROOT "" CACHE PATH "Root directory of an AprilTag installation (optional)")
 option(FORCE_BUNDLED_APRILTAG "Always build the bundled AprilTag dependency" OFF)
 
+# Tuning knobs for producing a ready-to-copy portable install folder (so the
+# Windows build can be copied to a Linux Pi target without extra steps).
+set(_portable_hint "${CMAKE_BINARY_DIR}/portable")
+if(DEFINED ENV{HOME})
+    file(TO_CMAKE_PATH "$ENV{HOME}/Desktop/AprilVisionPortable" _portable_hint)
+endif()
+if(WIN32 AND DEFINED ENV{USERPROFILE})
+    file(TO_CMAKE_PATH "$ENV{USERPROFILE}/Desktop/AprilVisionPortable" _portable_hint)
+endif()
+set(PORTABLE_INSTALL_PREFIX "${_portable_hint}" CACHE PATH
+        "Destination directory for the ready-to-run portable bundle")
+option(AUTO_PORTABLE_BUNDLE "Automatically stage the portable bundle after building" ON)
+
 set(_apriltag_include_hints)
 if(APRILTAG_ROOT)
     list(APPEND _apriltag_include_hints
@@ -73,6 +86,10 @@ endif()
 if(NOT APRILTAG_INCLUDE_DIR OR NOT APRILTAG_LIB)
     message(STATUS "System AprilTag not found, fetching source...")
     include(FetchContent)
+    set(BUILD_SHARED_LIBS ON CACHE BOOL "Build shared AprilTag binaries" FORCE)
+    set(BUILD_EXAMPLES OFF CACHE BOOL "Disable AprilTag demo executables" FORCE)
+    set(BUILD_TESTING OFF CACHE BOOL "Disable AprilTag tests" FORCE)
+    set(BUILD_PYTHON_WRAPPER OFF CACHE BOOL "Skip AprilTag python bindings" FORCE)
     FetchContent_Declare(
             apriltag
             GIT_REPOSITORY https://github.com/AprilRobotics/apriltag.git
@@ -212,4 +229,24 @@ if(APRILTAG_BUNDLED)
     install(TARGETS apriltag
             ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
             LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()
+
+set(_portable_install_cmd ${CMAKE_COMMAND} --install ${CMAKE_BINARY_DIR} --prefix "${PORTABLE_INSTALL_PREFIX}")
+if(CMAKE_CONFIGURATION_TYPES)
+    list(APPEND _portable_install_cmd --config $<CONFIG>)
+endif()
+
+add_custom_target(portable_bundle
+        COMMAND ${CMAKE_COMMAND} -E rm -rf "${PORTABLE_INSTALL_PREFIX}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${PORTABLE_INSTALL_PREFIX}"
+        COMMAND ${_portable_install_cmd}
+        DEPENDS ${PROJECT_NAME}
+        COMMENT "Staging portable bundle to ${PORTABLE_INSTALL_PREFIX}")
+
+if(AUTO_PORTABLE_BUNDLE)
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E rm -rf "${PORTABLE_INSTALL_PREFIX}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${PORTABLE_INSTALL_PREFIX}"
+            COMMAND ${_portable_install_cmd}
+            COMMENT "Auto-staging portable bundle to ${PORTABLE_INSTALL_PREFIX}")
 endif()
