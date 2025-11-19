@@ -120,6 +120,18 @@ target_link_libraries(${PROJECT_NAME}
         ${_apriltag_link_target}
 )
 
+if(UNIX AND NOT APPLE)
+    set_target_properties(${PROJECT_NAME} PROPERTIES BUILD_RPATH "$ORIGIN")
+endif()
+
+if(UNIX AND NOT APPLE AND APRILTAG_BUNDLED)
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:apriltag>
+            $<TARGET_FILE_DIR:${PROJECT_NAME}>
+            VERBATIM)
+endif()
+
 #
 # Windows runtime dependency staging
 # STATUS_DLL_NOT_FOUND (0xC0000135) occurs when the executable cannot locate
@@ -191,3 +203,13 @@ endif()
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Compiler: ${CMAKE_CXX_COMPILER_ID}")
+
+include(GNUInstallDirs)
+install(TARGETS ${PROJECT_NAME}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+if(APRILTAG_BUNDLED)
+    install(TARGETS apriltag
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+endif()

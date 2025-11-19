@@ -94,6 +94,13 @@ FrameProcessor::FrameProcessor()
     , detectionRate_(config::DETECTION_RATE_HZ)
     , emaPosAlpha_(config::EMA_ALPHA_POS)
     , emaPoseAlpha_(config::EMA_ALPHA_POSE)
+    , highSpeedMode_(config::DEFAULT_HIGH_SPEED_MODE)
+    , highSpeedConfig_()
+    , activeRoi_()
+    , roiHoldFrames_(0)
+    , fpsWindowStart_(std::chrono::steady_clock::now())
+    , fpsWindowFrames_(0)
+    , effectiveFps_(0.0)
 {
     detector_ = std::make_unique<Detector>();
     poseEstimator_ = std::make_unique<PoseEstimator>();
@@ -125,6 +132,23 @@ void FrameProcessor::setGamma(double gamma) {
     }
 }
 
+void FrameProcessor::setHighSpeedMode(bool enabled) {
+    if (highSpeedMode_ == enabled) return;
+    highSpeedMode_ = enabled;
+    if (!highSpeedMode_) {
+        activeRoi_ = cv::Rect();
+        roiHoldFrames_ = 0;
+    }
+}
+
+void FrameProcessor::configureHighSpeed(const HighSpeedConfig& cfg) {
+    highSpeedConfig_ = cfg;
+    highSpeedConfig_.forcedSize.width = std::max(32, highSpeedConfig_.forcedSize.width);
+    highSpeedConfig_.forcedSize.height = std::max(32, highSpeedConfig_.forcedSize.height);
+    highSpeedConfig_.roiPersistence = std::max(1, highSpeedConfig_.roiPersistence);
+    highSpeedConfig_.minEdge = std::max(8, highSpeedConfig_.minEdge);
+}
+
 void FrameProcessor::buildGammaLUT(double gamma) {
     gammaLUT_.resize(256);
     if (std::abs(gamma - 1.0) < 1e-3) {
@@ -135,6 +159,41 @@ void FrameProcessor::buildGammaLUT(double gamma) {
             gammaLUT_[i] = static_cast<uint8_t>(cv::saturate_cast<uchar>(std::pow(i / 255.0, inv) * 255.0));
         }
     }
+}
+
+cv::Rect FrameProcessor::clampRectToImage(const cv::Rect& r, int width, int height) const {
+    cv::Rect safe = r;
+    safe.x = std::clamp(safe.x, 0, width);
+    safe.y = std::clamp(safe.y, 0, height);
+    safe.width = std::clamp(safe.width, 0, width - safe.x);
+    safe.height = std::clamp(safe.height, 0, height - safe.y);
+    return safe;
+}
+
+cv::Rect FrameProcessor::growRect(const cv::Rect& r, double scale, int width, int height, int minEdge) const {
+    cv::Rect grown = r;
+    if (grown.width == 0 || grown.height == 0) {
+        grown = cv::Rect(0, 0, width, height);
+    }
+    const double cx = grown.x + grown.width / 2.0;
+    const double cy = grown.y + grown.height / 2.0;
+    double hw = std::max(static_cast<double>(grown.width), static_cast<double>(minEdge)) * scale * 0.5;
+    double hh = std::max(static_cast<double>(grown.height), static_cast<double>(minEdge)) * scale * 0.5;
+    cv::Rect2d expanded(cx - hw, cy - hh, hw * 2.0, hh * 2.0);
+    cv::Rect integerRect(static_cast<int>(std::floor(expanded.x)),
+                        static_cast<int>(std::floor(expanded.y)),
+                        static_cast<int>(std::ceil(expanded.width)),
+                        static_cast<int>(std::ceil(expanded.height)));
+    return clampRectToImage(integerRect, width, height);
+}
+
+cv::Rect FrameProcessor::scaleRect(const cv::Rect& r, double sx, double sy) const {
+    return cv::Rect(
+        static_cast<int>(std::round(r.x * sx)),
+        static_cast<int>(std::round(r.y * sy)),
+        static_cast<int>(std::round(r.width * sx)),
+        static_cast<int>(std::round(r.height * sy))
+    );
 }
 
 cv::Mat FrameProcessor::preprocessImage(const cv::Mat& gray) {
@@ -177,6 +236,7 @@ bool FrameProcessor::shouldProcessTag(int id) {
 
 cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stats) {
     auto t0 = std::chrono::high_resolution_clock::now();
+    stats = ProcessingStats{};
 
     if (frame.empty()) {
         return cv::Mat();
@@ -190,39 +250,99 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         PoseEstimator::defaultCameraMatrix(w, h, cameraMatrix_, distCoeffs_);
     }
 
-    // Convert to grayscale (reuse buffer)
     if (grayBuf_.size() != frame.size()) {
         grayBuf_ = cv::Mat(h, w, CV_8UC1);
     }
 
-    cv::Mat gray;
+    cv::Mat grayFull;
     if (frame.channels() == 3) {
         cv::cvtColor(frame, grayBuf_, cv::COLOR_BGR2GRAY);
-        gray = grayBuf_;
+        grayFull = grayBuf_;
     } else {
-        gray = frame;
+        grayFull = frame;
     }
 
-    // Preprocess
-    cv::Mat grayProc = preprocessImage(gray);
-    if (!grayProc.isContinuous()) grayProc = grayProc.clone();  // stride safety
+    // Track instantaneous FPS
+    auto now = std::chrono::steady_clock::now();
+    ++fpsWindowFrames_;
+    double fpsWindowSeconds = std::chrono::duration<double>(now - fpsWindowStart_).count();
+    if (fpsWindowSeconds >= 0.5) {
+        effectiveFps_ = fpsWindowFrames_ / fpsWindowSeconds;
+        fpsWindowFrames_ = 0;
+        fpsWindowStart_ = now;
+    }
 
-    // Adaptive decimation based on blur → handed to AprilTag (internal decimate)
-    const double blurVar = computeBlurVariance(grayProc);
+    cv::Mat working = grayFull;
+    double scaleX = 1.0;
+    double scaleY = 1.0;
+
+    if (highSpeedMode_) {
+        const bool needsResize = (highSpeedConfig_.forcedSize.width > 0 && highSpeedConfig_.forcedSize.height > 0 &&
+                                 (grayFull.cols != highSpeedConfig_.forcedSize.width || grayFull.rows != highSpeedConfig_.forcedSize.height));
+        if (needsResize) {
+            if (resizedGray_.size() != highSpeedConfig_.forcedSize) {
+                resizedGray_.create(highSpeedConfig_.forcedSize, CV_8UC1);
+            }
+            cv::resize(grayFull, resizedGray_, highSpeedConfig_.forcedSize, 0, 0, cv::INTER_AREA);
+            working = resizedGray_;
+            scaleX = static_cast<double>(grayFull.cols) / highSpeedConfig_.forcedSize.width;
+            scaleY = static_cast<double>(grayFull.rows) / highSpeedConfig_.forcedSize.height;
+        }
+    } else {
+        activeRoi_ = cv::Rect();
+        roiHoldFrames_ = 0;
+    }
+
+    cv::Mat grayProc = preprocessImage(working);
+    if (!grayProc.isContinuous()) grayProc = grayProc.clone();
+
+    cv::Rect roiRect(0, 0, grayProc.cols, grayProc.rows);
+    bool roiActive = false;
+    if (highSpeedMode_ && activeRoi_.area() > 0) {
+        roiRect = clampRectToImage(activeRoi_, grayProc.cols, grayProc.rows);
+        roiActive = roiRect.area() > 0 && roiRect.area() < grayProc.cols * grayProc.rows;
+    }
+
+    const double roiCoverage = roiActive
+        ? static_cast<double>(roiRect.area()) / static_cast<double>(grayProc.cols * grayProc.rows)
+        : 1.0;
+
+    cv::Mat detectView = grayProc(roiRect);
+    if (!detectView.isContinuous()) detectView = detectView.clone();
+
+    const double blurVar = computeBlurVariance(detectView);
     const int decimate = chooseDecimate(baseDecimate_, blurVar);
     detector_->setDecimate(static_cast<float>(decimate));
 
-    // Detect tags ON THE SAME IMAGE we'll refine on
-    std::vector<Detection> detections = detector_->detect(grayProc);
-
-    // Filter detections
     std::vector<Detection> filtered;
+    auto detections = detector_->detect(detectView);
     filtered.reserve(detections.size());
     for (const auto& det : detections) {
-        if (shouldProcessTag(det.id)) filtered.push_back(det);
+        if (!shouldProcessTag(det.id)) continue;
+        Detection adjusted = det;
+        auto corners = PoseEstimator::orderCorners(det.corners);
+        for (auto& pt : corners) {
+            pt.x += roiRect.x;
+            pt.y += roiRect.y;
+            pt.x *= scaleX;
+            pt.y *= scaleY;
+        }
+        adjusted.corners = corners;
+        filtered.push_back(std::move(adjusted));
     }
 
-    // Visualization
+    if (highSpeedMode_) {
+        if (filtered.empty()) {
+            if (roiHoldFrames_ > 0) {
+                --roiHoldFrames_;
+            } else {
+                activeRoi_ = cv::Rect();
+            }
+        } else {
+            roiHoldFrames_ = highSpeedConfig_.roiPersistence;
+        }
+    }
+
     cv::Mat vis;
     if (frame.channels() == 3) vis = frame.clone();
     else                       cv::cvtColor(frame, vis, cv::COLOR_GRAY2BGR);
@@ -230,37 +350,47 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
     std::set<int> visibleIds;
     std::vector<TagData> tagDataList;
 
-    // Process each detection
+    const double invScaleX = (scaleX != 0.0) ? (1.0 / scaleX) : 1.0;
+    const double invScaleY = (scaleY != 0.0) ? (1.0 / scaleY) : 1.0;
+
     for (auto& det : filtered) {
         visibleIds.insert(det.id);
-
-        // Order corners & compute polygon area
         std::vector<cv::Point2f> corners = PoseEstimator::orderCorners(det.corners);
         const double area = PoseEstimator::polygonArea(corners);
 
-        // ---- Safe sub-pixel refinement on the SAME image/scale used for detection ----
-        // Prevents: OpenCV(…) error: Rect(0,0,src.cols,src.rows).contains(cT) in cv::cornerSubPix
-        // (points must be inside the image; we skip those too close to borders). :contentReference[oaicite:3]{index=3}
         if (area > 30.0) {
             const cv::Size subWin(config::CORNER_SUBPIX_WIN, config::CORNER_SUBPIX_WIN);
             const int margin = std::max(subWin.width, subWin.height) / 2;
-
-            if (!anyCornerNearBorder(corners, grayProc.cols, grayProc.rows, margin)) {
-                safeCornerSubPix(grayProc, corners, subWin);
+            if (!anyCornerNearBorder(corners, grayFull.cols, grayFull.rows, margin)) {
+                safeCornerSubPix(grayFull, corners, subWin);
             }
-            // else: skip refinement for this tag this frame (too close to edge)
         }
 
-        // Update tracker
+        if (highSpeedMode_) {
+            std::vector<cv::Point2f> detSpace = corners;
+            for (auto& pt : detSpace) {
+                pt.x = static_cast<float>(pt.x * invScaleX);
+                pt.y = static_cast<float>(pt.y * invScaleY);
+            }
+            cv::Rect detBox = cv::boundingRect(detSpace);
+            if (detBox.area() > 0) {
+                detBox = clampRectToImage(detBox, grayProc.cols, grayProc.rows);
+                cv::Rect grown = growRect(detBox, highSpeedConfig_.roiInflation, grayProc.cols, grayProc.rows, highSpeedConfig_.minEdge);
+                if (activeRoi_.area() > 0) {
+                    activeRoi_ = clampRectToImage(activeRoi_ | grown, grayProc.cols, grayProc.rows);
+                } else {
+                    activeRoi_ = grown;
+                }
+            }
+        }
+
         updateTracker(det.id, corners);
         lastCorners_[det.id] = corners;
 
-        // Compute Limelight-style values
         double tx_deg, ty_deg, ta_percent;
         PoseEstimator::computeLimelightValues(corners, cameraMatrix_, w, h,
                                               tx_deg, ty_deg, ta_percent);
 
-        // Solve pose when large enough
         const double diag = cv::norm(corners[0] - corners[2]);
         cv::Vec3d tvec(0, 0, 0), rvec(0, 0, 0);
         double reprojErr = 0.0;
@@ -269,21 +399,18 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
             auto poseResult = poseEstimator_->solvePose(corners, tagSizeM_,
                                                         cameraMatrix_, distCoeffs_);
             if (poseResult) {
-                // Smooth position
                 auto& posSmooth = posSmoothers_[det.id];
                 if (!posSmooth || std::abs(posSmooth->getAlpha() - emaPosAlpha_) > 1e-9)
                     posSmooth = std::make_unique<EMASmoother>(emaPosAlpha_);
                 Eigen::Vector3d tvecE(poseResult->tvec[0], poseResult->tvec[1], poseResult->tvec[2]);
                 Eigen::VectorXd sPos = posSmooth->update(tvecE);
 
-                // Smooth orientation
                 auto& poseSmooth = poseSmoothers_[det.id];
                 if (!poseSmooth || std::abs(poseSmooth->getAlpha() - emaPoseAlpha_) > 1e-9)
                     poseSmooth = std::make_unique<EMASmoother>(emaPoseAlpha_);
                 Eigen::Vector3d rvecE(poseResult->rvec[0], poseResult->rvec[1], poseResult->rvec[2]);
                 Eigen::VectorXd sRot = poseSmooth->update(rvecE);
 
-                // Median filter if enabled
                 if (config::POSE_MEDIAN_WINDOW > 1) {
                     auto& med = poseMedians_[det.id];
                     if (!med) med = std::make_unique<MedianBuffer>(config::POSE_MEDIAN_WINDOW);
@@ -311,16 +438,13 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
             }
         }
 
-        // Draw detection
         drawDetection(vis, det, corners, tx_deg, ty_deg, ta_percent, tvec);
     }
 
-    // Predict invisible tags (optical flow + Kalman)
     if (!prevGray_.empty()) {
-        predictInvisibleTags(vis, w, h, visibleIds, prevGray_, gray);
+        predictInvisibleTags(vis, w, h, visibleIds, prevGray_, grayFull);
     }
 
-    // Scene purge logic
     if (visibleIds.empty()) {
         if (!sceneHasUnseen_) {
             sceneUnseenStart_ = std::chrono::steady_clock::now();
@@ -342,13 +466,9 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         sceneHasUnseen_ = false;
     }
 
-    // Purge old trackers
     purgeOldTrackers(visibleIds);
+    grayFull.copyTo(prevGray_);
 
-    // Store current frame for optical flow
-    gray.copyTo(prevGray_);
-
-    // Publish
     if (publisher_ && !tagDataList.empty()) {
         VisionPayload payload;
         payload.timestamp = std::chrono::duration<double>(
@@ -357,7 +477,6 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         publisher_->publish(payload);
     }
 
-    // Stats
     auto t1 = std::chrono::high_resolution_clock::now();
     const double procTimeMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
@@ -382,6 +501,11 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
     stats.avgProcessTimeMs = procTimeMs;
     stats.tagCount = static_cast<int>(filtered.size());
     stats.blurVariance = blurVar;
+    stats.effectiveFps = effectiveFps_;
+    stats.roiCoverage = roiCoverage;
+    stats.roiActive = roiActive;
+    stats.roiRect = roiActive ? scaleRect(roiRect, scaleX, scaleY) : cv::Rect();
+    stats.highSpeedMode = highSpeedMode_;
 
     return vis;
 }

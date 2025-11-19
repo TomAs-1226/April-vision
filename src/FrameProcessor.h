@@ -4,6 +4,7 @@
 #include "PoseEstimator.h"
 #include "Tracker.h"
 #include "NetworkPublisher.h"
+#include "Config.h"
 #include <opencv2/opencv.hpp>
 #include <memory>
 #include <map>
@@ -14,10 +15,22 @@
 #include <chrono>
 
 struct ProcessingStats {
-    double detectionRateHz;
-    double avgProcessTimeMs;
-    int tagCount;
-    double blurVariance;
+    double detectionRateHz{0.0};
+    double avgProcessTimeMs{0.0};
+    double effectiveFps{0.0};
+    int tagCount{0};
+    double blurVariance{0.0};
+    double roiCoverage{1.0};
+    bool roiActive{false};
+    cv::Rect roiRect;
+    bool highSpeedMode{false};
+};
+
+struct HighSpeedConfig {
+    cv::Size forcedSize{config::HIGH_SPEED_WIDTH, config::HIGH_SPEED_HEIGHT};
+    double roiInflation{config::HIGH_SPEED_ROI_INFLATION};
+    int roiPersistence{config::HIGH_SPEED_ROI_PERSISTENCE};
+    int minEdge{config::HIGH_SPEED_MIN_ROI_EDGE};
 };
 
 class FrameProcessor {
@@ -38,6 +51,9 @@ public:
     void setWhitelist(const std::set<int>& ids) { whitelist_ = ids; useWhitelist_ = true; }
     void setBlacklist(const std::set<int>& ids) { blacklist_ = ids; useBlacklist_ = true; }
     void clearFilters() { useWhitelist_ = false; useBlacklist_ = false; }
+    void setHighSpeedMode(bool enabled);
+    void configureHighSpeed(const HighSpeedConfig& cfg);
+    bool isHighSpeedMode() const { return highSpeedMode_; }
 
     // Network publishing
     void setNetworkPublisher(std::shared_ptr<NetworkPublisher> pub) { publisher_ = pub; }
@@ -50,6 +66,9 @@ private:
     double computeBlurVariance(const cv::Mat& gray);
     int chooseDecimate(int base, double blurVar);
     void buildGammaLUT(double gamma);
+    cv::Rect clampRectToImage(const cv::Rect& r, int width, int height) const;
+    cv::Rect growRect(const cv::Rect& r, double scale, int width, int height, int minEdge) const;
+    cv::Rect scaleRect(const cv::Rect& r, double sx, double sy) const;
 
     // Detection filtering
     bool shouldProcessTag(int id);
@@ -115,4 +134,13 @@ private:
     // Buffers (reused to avoid allocation)
     cv::Mat grayBuf_;
     cv::Mat preprocessBuf_;
+    cv::Mat resizedGray_;
+
+    bool highSpeedMode_;
+    HighSpeedConfig highSpeedConfig_;
+    cv::Rect activeRoi_;
+    int roiHoldFrames_;
+    std::chrono::steady_clock::time_point fpsWindowStart_;
+    int fpsWindowFrames_;
+    double effectiveFps_;
 };

@@ -23,12 +23,29 @@ inline constexpr int CAM_WARMUP_FRAMES = 12;
 inline constexpr int CAM_WARMUP_DELAY_MS = 8;
 inline constexpr bool CAM_FORCE_MJPEG = true;
 
+inline constexpr double CAMERA_EXPOSURE_MIN = -13.0;
+inline constexpr double CAMERA_EXPOSURE_MAX = -1.0;
+inline constexpr double CAMERA_GAIN_MIN = 0.0;
+inline constexpr double CAMERA_GAIN_MAX = 128.0;
+inline constexpr double CAMERA_BRIGHTNESS_MIN = 0.0;
+inline constexpr double CAMERA_BRIGHTNESS_MAX = 255.0;
+inline constexpr double CAMERA_PROP_SLIDER_SCALE = 100.0;
+inline constexpr int CAMERA_CONTROL_POLL_MS = 250;
+
+inline constexpr bool DEFAULT_HIGH_SPEED_MODE = true;
+inline constexpr int HIGH_SPEED_WIDTH = 424;
+inline constexpr int HIGH_SPEED_HEIGHT = 240;
+inline constexpr double HIGH_SPEED_ROI_INFLATION = 1.5;
+inline constexpr int HIGH_SPEED_ROI_PERSISTENCE = 6;
+inline constexpr int HIGH_SPEED_MIN_ROI_EDGE = 32;
+
 // Performance tuning
 inline constexpr int DETECTION_RATE_HZ = 60;
 inline constexpr int GUI_RATE_HZ = 20;
 inline constexpr int MIN_DET_RATE = 8;
 inline constexpr int MAX_DET_RATE = 120;
 inline constexpr int DETECTOR_THREADS = 0; // 0 => auto-detect
+inline constexpr double FPS_LOG_INTERVAL_S = 2.0;
 
 // NetworkTables / UDP
 inline constexpr const char* NT_SERVER = "10.0.0.2";
