@@ -14,10 +14,15 @@
 #include <chrono>
 
 struct ProcessingStats {
-    double detectionRateHz;
-    double avgProcessTimeMs;
-    int tagCount;
-    double blurVariance;
+    double detectionRateHz = 0.0;
+    double avgProcessTimeMs = 0.0;
+    double frameTimeMs = 0.0;
+    double effectiveFps = 0.0;
+    int tagCount = 0;
+    double blurVariance = 0.0;
+    bool highSpeedMode = false;
+    bool usedROI = false;
+    cv::Rect roiRect;
 };
 
 class FrameProcessor {
@@ -31,13 +36,15 @@ public:
     // Configuration
     void setTagSize(double meters) { tagSizeM_ = meters; }
     void setCameraMatrix(const cv::Mat& K, const cv::Mat& D);
-    void setDecimate(int dec) { baseDecimate_ = dec; }
+    void setDecimate(int dec);
     void setEMAAlpha(double pos, double pose);
-    void enableCLAHE(bool enable) { useCLAHE_ = enable; }
+    void enableCLAHE(bool enable);
     void setGamma(double gamma);
     void setWhitelist(const std::set<int>& ids) { whitelist_ = ids; useWhitelist_ = true; }
     void setBlacklist(const std::set<int>& ids) { blacklist_ = ids; useBlacklist_ = true; }
     void clearFilters() { useWhitelist_ = false; useBlacklist_ = false; }
+    void setHighSpeedMode(bool enable);
+    bool highSpeedModeEnabled() const { return highSpeedMode_; }
 
     // Network publishing
     void setNetworkPublisher(std::shared_ptr<NetworkPublisher> pub) { publisher_ = pub; }
@@ -50,9 +57,13 @@ private:
     double computeBlurVariance(const cv::Mat& gray);
     int chooseDecimate(int base, double blurVar);
     void buildGammaLUT(double gamma);
+    void applyGammaInternal(double gamma);
 
     // Detection filtering
     bool shouldProcessTag(int id);
+    cv::Rect computeHistoryROI(int width, int height) const;
+    cv::Rect expandROI(const cv::Rect& base, int width, int height) const;
+    void resetROI();
 
     // Tracking helpers
     void updateTracker(int id, const std::vector<cv::Point2f>& corners);
@@ -88,6 +99,16 @@ private:
     bool useBlacklist_;
     std::set<int> whitelist_;
     std::set<int> blacklist_;
+
+    bool highSpeedMode_;
+    bool useROITracking_;
+    cv::Rect activeROI_;
+    int roiMissCount_;
+    cv::Mat roiBuf_;
+
+    bool userCLAHEPref_;
+    double userGamma_;
+    int userDecimate_;
 
     // Tracking state
     std::map<int, std::unique_ptr<BoxTracker>> trackers_;

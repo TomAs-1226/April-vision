@@ -10,9 +10,6 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug)
 endif()
 
-# CRITICAL: Define NOMINMAX to prevent Windows min/max macros
-add_definitions(-DNOMINMAX)
-
 # Compiler optimizations - FIXED for Visual Studio
 if(MSVC)
     # Remove conflicting flags
@@ -32,19 +29,51 @@ endif()
 find_package(OpenCV REQUIRED)
 find_package(Eigen3 REQUIRED)
 
+set(APRILTAG_ROOT "" CACHE PATH "Root directory of an AprilTag installation (optional)")
+
+set(_apriltag_include_hints)
+if(APRILTAG_ROOT)
+    list(APPEND _apriltag_include_hints
+        "${APRILTAG_ROOT}"
+        "${APRILTAG_ROOT}/include"
+        "${APRILTAG_ROOT}/include/apriltag")
+endif()
+
+find_path(APRILTAG_INCLUDE_DIR
+    NAMES apriltag.h
+    HINTS ${_apriltag_include_hints}
+    PATHS /usr/include /usr/local/include /opt/homebrew/include
+    PATH_SUFFIXES apriltag
+)
+
+if(NOT APRILTAG_INCLUDE_DIR)
+    message(FATAL_ERROR "AprilTag headers not found. Set APRILTAG_ROOT or install apriltag.")
+endif()
+
+set(_apriltag_library_hints)
+if(APRILTAG_ROOT)
+    list(APPEND _apriltag_library_hints
+        "${APRILTAG_ROOT}/lib"
+        "${APRILTAG_ROOT}/lib64"
+        "${APRILTAG_ROOT}/build"
+        "${APRILTAG_ROOT}/build/Release"
+        "${APRILTAG_ROOT}/build/Debug")
+endif()
+
+find_library(APRILTAG_LIB
+    NAMES apriltag
+    HINTS ${_apriltag_library_hints}
+    PATHS /usr/lib /usr/local/lib /usr/lib/aarch64-linux-gnu /usr/lib/arm-linux-gnueabihf /opt/homebrew/lib
+)
+
+if(NOT APRILTAG_LIB)
+    message(FATAL_ERROR "AprilTag library not found. Set APRILTAG_ROOT or install apriltag.")
+endif()
+
+message(STATUS "Found AprilTag: ${APRILTAG_LIB}")
+
 message(STATUS "OpenCV version: ${OpenCV_VERSION}")
 message(STATUS "OpenCV libs: ${OpenCV_LIBS}")
-
-# AprilTag paths
-set(APRILTAG_INCLUDE_DIR "C:/apriltag" CACHE PATH "AprilTag include directory")
-set(APRILTAG_LIB_DIR "C:/apriltag/build" CACHE PATH "AprilTag library directory")
-
-# Include directories
-include_directories(
-        ${OpenCV_INCLUDE_DIRS}
-        ${EIGEN3_INCLUDE_DIR}
-        ${APRILTAG_INCLUDE_DIR}
-)
 
 # Source files
 set(SOURCES
@@ -59,10 +88,17 @@ set(SOURCES
 # Create executable
 add_executable(${PROJECT_NAME} ${SOURCES})
 
+target_include_directories(${PROJECT_NAME} PRIVATE
+        ${OpenCV_INCLUDE_DIRS}
+        ${APRILTAG_INCLUDE_DIR}
+        ${EIGEN3_INCLUDE_DIR})
+target_compile_definitions(${PROJECT_NAME} PRIVATE NOMINMAX)
+
 # Link libraries
 target_link_libraries(${PROJECT_NAME}
         ${OpenCV_LIBS}
         Eigen3::Eigen
+        ${APRILTAG_LIB}
 )
 
 #
@@ -75,6 +111,7 @@ target_link_libraries(${PROJECT_NAME}
 # binary starts successfully without requiring manual copying.
 #
 if(WIN32)
+    set(APRILTAG_RUNTIME_DIR "" CACHE PATH "Directory containing AprilTag runtime DLLs (optional)")
     # Helper to register a copy command only if the DLL exists at configure time.
     function(_apriltag_stage_dll dll_path)
         if(EXISTS "${dll_path}")
@@ -105,11 +142,19 @@ if(WIN32)
         endforeach()
     endif()
 
-    # Gather AprilTag runtime DLLs from the configured library directory.
-    set(_apriltag_candidate_dirs
-            "${APRILTAG_LIB_DIR}"
-            "${APRILTAG_LIB_DIR}/Release"
-            "${APRILTAG_LIB_DIR}/Debug")
+    # Gather AprilTag runtime DLLs
+    set(_apriltag_candidate_dirs)
+    if(APRILTAG_RUNTIME_DIR)
+        list(APPEND _apriltag_candidate_dirs "${APRILTAG_RUNTIME_DIR}")
+    endif()
+    if(APRILTAG_LIB)
+        get_filename_component(_apriltag_lib_dir "${APRILTAG_LIB}" DIRECTORY)
+        list(APPEND _apriltag_candidate_dirs
+                "${_apriltag_lib_dir}"
+                "${_apriltag_lib_dir}/Release"
+                "${_apriltag_lib_dir}/Debug")
+    endif()
+    list(REMOVE_DUPLICATES _apriltag_candidate_dirs)
     foreach(_dir ${_apriltag_candidate_dirs})
         if(EXISTS "${_dir}")
             file(GLOB _apriltag_runtime_dlls "${_dir}/*.dll")
@@ -118,23 +163,6 @@ if(WIN32)
             endforeach()
         endif()
     endforeach()
-endif()
-
-# Find AprilTag library
-find_library(APRILTAG_LIB
-        NAMES apriltag
-        PATHS
-        ${APRILTAG_LIB_DIR}/Release
-        ${APRILTAG_LIB_DIR}/Debug
-        ${APRILTAG_LIB_DIR}
-        NO_DEFAULT_PATH
-)
-
-if(APRILTAG_LIB)
-    message(STATUS "Found AprilTag: ${APRILTAG_LIB}")
-    target_link_libraries(${PROJECT_NAME} ${APRILTAG_LIB})
-else()
-    message(WARNING "AprilTag library not found in ${APRILTAG_LIB_DIR}")
 endif()
 
 # Windows specific
