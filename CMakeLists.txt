@@ -35,6 +35,16 @@ find_package(Eigen3 REQUIRED)
 message(STATUS "OpenCV version: ${OpenCV_VERSION}")
 message(STATUS "OpenCV libs: ${OpenCV_LIBS}")
 
+option(ENABLE_NETWORKTABLES "Build with WPILib ntcore support" ON)
+if(ENABLE_NETWORKTABLES)
+    find_package(ntcore QUIET)
+    if(ntcore_FOUND)
+        message(STATUS "ntcore located; NetworkTables publishing enabled")
+    else()
+        message(WARNING "ntcore not found - NetworkTables publishing disabled")
+    endif()
+endif()
+
 # AprilTag paths
 set(APRILTAG_INCLUDE_DIR "C:/apriltag" CACHE PATH "AprilTag include directory")
 set(APRILTAG_LIB_DIR "C:/apriltag/build" CACHE PATH "AprilTag library directory")
@@ -54,6 +64,8 @@ set(SOURCES
         src/Tracker.cpp
         src/NetworkPublisher.cpp
         src/FrameProcessor.cpp
+        src/ArucoPoseHelper.cpp
+        src/FieldLayout.cpp
 )
 
 # Create executable
@@ -64,6 +76,11 @@ target_link_libraries(${PROJECT_NAME}
         ${OpenCV_LIBS}
         Eigen3::Eigen
 )
+
+if(ENABLE_NETWORKTABLES AND ntcore_FOUND)
+    target_link_libraries(${PROJECT_NAME} ntcore)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE USE_NTCORE=1)
+endif()
 
 #
 # Windows runtime dependency staging

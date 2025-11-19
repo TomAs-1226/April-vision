@@ -20,6 +20,7 @@ public:
 
     // Expects CV_8UC1 (we enforce grayscale/contiguity inside detect()).
     std::vector<Detection> detect(const cv::Mat& img);
+    std::vector<Detection> detectROI(const cv::Mat& img, const cv::Rect& roi);
 
     void setDecimate(float v);
     void setBlur(float v);

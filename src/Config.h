@@ -17,18 +17,23 @@ inline constexpr double DEFAULT_TAG_SIZE_M = 0.1524;
 
 // Camera settings
 inline constexpr int CAM_IDX = 0;
-inline constexpr int CAPTURE_FPS = 60;
-inline constexpr int FRAME_UI_MS = 12;
+inline constexpr int CAPTURE_FPS = 120;
+inline constexpr int FRAME_UI_MS = 8;
 inline constexpr int CAM_WARMUP_FRAMES = 12;
 inline constexpr int CAM_WARMUP_DELAY_MS = 8;
 inline constexpr bool CAM_FORCE_MJPEG = true;
 
 // Performance tuning
-inline constexpr int DETECTION_RATE_HZ = 60;
+inline constexpr int DETECTION_RATE_HZ = 120;
 inline constexpr int GUI_RATE_HZ = 20;
-inline constexpr int MIN_DET_RATE = 8;
-inline constexpr int MAX_DET_RATE = 120;
+inline constexpr int MIN_DET_RATE = 30;
+inline constexpr int MAX_DET_RATE = 180;
 inline constexpr int DETECTOR_THREADS = 0; // 0 => auto-detect
+inline constexpr double FAST_MODE_TRIGGER_MS = 9.0;
+inline constexpr int FAST_MODE_RECOVERY_FRAMES = 10;
+inline constexpr bool FAST_MODE_SKIP_REFINEMENT = true;
+inline constexpr bool FAST_MODE_SKIP_MULTITAG = true;
+inline constexpr double FAST_MODE_MIN_SUBPIX_DIAG = 22.0;
 
 // NetworkTables / UDP
 inline constexpr const char* NT_SERVER = "10.0.0.2";
@@ -40,6 +45,14 @@ inline constexpr int UDP_TARGET_PORT = 5800;
 inline constexpr int DEFAULT_DECIMATE = 1;
 inline constexpr double DEFAULT_CONF = 0.18;
 inline constexpr double REPROJ_ERR_THRESH = 2.2;
+
+// Dynamic ROI hunting (high-speed tracking)
+inline constexpr int ROI_MAX_COUNT = 8;
+inline constexpr int ROI_FULL_FRAME_INTERVAL = 6;
+inline constexpr double ROI_MARGIN_RATIO = 0.55;
+inline constexpr double ROI_MIN_MARGIN_PX = 12.0;
+inline constexpr double ROI_MAX_MARGIN_PX = 640.0;
+inline constexpr double ROI_VELOCITY_MARGIN_SCALE = 0.9; // pixels per (px/s)
 
 // Motion/adaptive decimation
 inline constexpr double BLUR_HIGH = 30.0;
@@ -76,9 +89,38 @@ inline constexpr double EMA_ALPHA_POSE = 0.22;
 // Pose median smoothing window
 inline constexpr int POSE_MEDIAN_WINDOW = 5;
 
+// Pose ambiguity scaling (lower => stricter)
+inline constexpr double POSE_AMBIGUITY_SCALE = 8.0;
+
 // Safety/CPU thresholds
 inline constexpr double PROCESS_TIME_HIGH_MS = 18.0;
 inline constexpr double PROCESS_TIME_LOW_MS = 8.0;
+
+// Auto align prediction
+inline constexpr double AUTOALIGN_LEAD_TIME_MS = 50.0;
+inline constexpr double TARGET_STABILITY_DECAY = 0.08;
+
+// Latency + predictive filtering
+inline constexpr double PIPELINE_EXTRA_LATENCY_MS = 8.0;
+inline constexpr double FILTER_ALPHA = 0.55;
+inline constexpr double FILTER_BETA = 0.24;
+inline constexpr double FILTER_GAMMA = 0.08;
+inline constexpr double FILTER_DEPTH_WEIGHT = 0.45;
+inline constexpr double FILTER_OUTLIER_TRANSLATION_M = 0.35;
+inline constexpr double FILTER_OUTLIER_VEL_MPS = 9.5;
+inline constexpr double FILTER_ORIENTATION_ALPHA = 0.35;
+inline constexpr double FILTER_ORIENTATION_OUTLIER_DEG = 35.0;
+inline constexpr double FILTER_PREDICT_HOLD_MS = 320.0;
+inline constexpr double PREDICTED_STABILITY_PENALTY = 0.55;
+
+// Field layout / Limelight compatibility
+inline constexpr const char* FIELD_LAYOUT_PATH = "assets/2024-crescendo.json";
+inline constexpr const char* FIELD_LAYOUT_REEFSCAPE_PATH = "assets/2025-reefscape-welded.json";
+inline constexpr bool FIELD_LAYOUT_INCLUDE_REEFSCAPE = true;
+inline constexpr double FIELD_LENGTH_METERS = 16.5418;
+inline constexpr double FIELD_WIDTH_METERS = 8.211;
+inline constexpr int MULTITAG_MIN_COUNT = 2;
+inline constexpr double MULTITAG_MAX_AMBIGUITY = 0.8;
 
 // CLAHE parameters
 inline constexpr double CLAHE_CLIP_LIMIT = 2.2;
@@ -88,5 +130,28 @@ inline constexpr int CLAHE_TILE_SIZE = 8;
 inline constexpr int CORNER_SUBPIX_WIN = 5;
 inline constexpr int CORNER_SUBPIX_MAX_ITER = 10;
 inline constexpr double CORNER_SUBPIX_EPS = 0.03;
+
+// Camera -> robot extrinsics (meters / degrees, robot-forward X, left Y, up Z)
+inline constexpr double CAMERA_TO_ROBOT_X = 0.0;
+inline constexpr double CAMERA_TO_ROBOT_Y = 0.0;
+inline constexpr double CAMERA_TO_ROBOT_Z = 0.64;
+inline constexpr double CAMERA_TO_ROBOT_ROLL_DEG = 0.0;
+inline constexpr double CAMERA_TO_ROBOT_PITCH_DEG = 0.0;
+inline constexpr double CAMERA_TO_ROBOT_YAW_DEG = 0.0;
+
+// Temporal denoise / glare suppression
+inline constexpr bool ENABLE_TEMPORAL_DENOISE = true;
+inline constexpr double TEMPORAL_DENOISE_ALPHA = 0.12;
+inline constexpr double TEMPORAL_DENOISE_MIX = 0.6;
+inline constexpr bool ENABLE_SPECULAR_SUPPRESSION = true;
+inline constexpr int SPECULAR_MEDIAN_SIZE = 9;
+inline constexpr double SPECULAR_THRESHOLD = 26.0;
+inline constexpr int SPECULAR_DILATE_ITER = 1;
+inline constexpr int SPECULAR_ERODE_ITER = 1;
+inline constexpr int SPECULAR_BILATERAL_DIAMETER = 9;
+inline constexpr double SPECULAR_BILATERAL_SIGMA = 45.0;
+inline constexpr double SPECULAR_SUPPRESS_GAIN = 0.65;
+inline constexpr double GLARE_STABILITY_WEIGHT = 0.55;
+inline constexpr double GLARE_SCORE_WEIGHT = 1.4;
 
 } // namespace config

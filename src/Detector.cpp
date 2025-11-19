@@ -101,6 +101,28 @@ std::vector<Detection> Detector::detect(const cv::Mat& img_in) {
     return out;
 }
 
+std::vector<Detection> Detector::detectROI(const cv::Mat& img, const cv::Rect& roi) {
+    if (img.empty() || roi.width <= 0 || roi.height <= 0) {
+        return {};
+    }
+
+    const cv::Rect frameRect(0, 0, img.cols, img.rows);
+    cv::Rect safe = roi & frameRect;
+    if (safe.width <= 0 || safe.height <= 0) {
+        return {};
+    }
+
+    cv::Mat patch = img(safe);
+    auto detections = detect(patch);
+    for (auto& det : detections) {
+        for (auto& pt : det.corners) {
+            pt.x += static_cast<float>(safe.x);
+            pt.y += static_cast<float>(safe.y);
+        }
+    }
+    return detections;
+}
+
 void Detector::setDecimate(float v)   { td_->quad_decimate = v; }
 void Detector::setBlur(float v)       { td_->quad_sigma    = v; }
 void Detector::setRefineEdges(bool on){ td_->refine_edges  = on ? 1 : 0; }

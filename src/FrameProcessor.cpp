@@ -4,8 +4,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <sstream>
 #include <iomanip>
+#include <string>
+#include <Eigen/Geometry>
 
 // Undefine Windows macros
 #ifdef max
@@ -79,6 +82,115 @@ namespace {
 
         return (int)safePts.size();
     }
+
+    inline double edgeLength(const cv::Point2f& a, const cv::Point2f& b) {
+        return cv::norm(a - b);
+    }
+
+    inline double computeSkewDeg(const std::vector<cv::Point2f>& corners) {
+        if (corners.size() < 4) return 0.0;
+        const cv::Point2f diag = corners[2] - corners[0];
+        return std::atan2(diag.y, diag.x) * 180.0 / M_PI;
+    }
+
+    inline std::pair<double, double> computeSideExtents(const std::vector<cv::Point2f>& corners) {
+        if (corners.size() < 4) return {0.0, 0.0};
+        double shortSide = std::numeric_limits<double>::max();
+        double longSide = 0.0;
+        for (size_t i = 0; i < 4; ++i) {
+            size_t j = (i + 1) % 4;
+            const double len = edgeLength(corners[i], corners[j]);
+            shortSide = std::min(shortSide, len);
+            longSide = std::max(longSide, len);
+        }
+        if (!std::isfinite(shortSide)) shortSide = 0.0;
+        if (!std::isfinite(longSide)) longSide = 0.0;
+        return {shortSide, longSide};
+    }
+
+    inline cv::Rect clampRect(const cv::Rect& r, int width, int height) {
+        cv::Rect frame(0, 0, width, height);
+        return r & frame;
+    }
+
+    inline cv::Vec3d matMul(const cv::Matx33d& R, const cv::Vec3d& v) {
+        return cv::Vec3d(
+            R(0,0) * v[0] + R(0,1) * v[1] + R(0,2) * v[2],
+            R(1,0) * v[0] + R(1,1) * v[1] + R(1,2) * v[2],
+            R(2,0) * v[0] + R(2,1) * v[1] + R(2,2) * v[2]
+        );
+    }
+
+    inline cv::Matx33d matFromCv(const cv::Mat& mat) {
+        cv::Matx33d out;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                out(r, c) = mat.at<double>(r, c);
+            }
+        }
+        return out;
+    }
+
+    inline cv::Matx33d rpyDegToMatrix(double rollDeg, double pitchDeg, double yawDeg) {
+        const double roll = rollDeg * M_PI / 180.0;
+        const double pitch = pitchDeg * M_PI / 180.0;
+        const double yaw = yawDeg * M_PI / 180.0;
+
+        const double c1 = std::cos(yaw);
+        const double s1 = std::sin(yaw);
+        const double c2 = std::cos(pitch);
+        const double s2 = std::sin(pitch);
+        const double c3 = std::cos(roll);
+        const double s3 = std::sin(roll);
+
+        cv::Matx33d Rz(c1, -s1, 0,
+                       s1,  c1, 0,
+                         0,   0, 1);
+        cv::Matx33d Ry(c2, 0, s2,
+                         0, 1, 0,
+                      -s2, 0, c2);
+        cv::Matx33d Rx(1, 0, 0,
+                       0, c3, -s3,
+                       0, s3,  c3);
+
+        return Rz * Ry * Rx;
+    }
+
+    inline Eigen::Quaterniond rvecToQuat(const cv::Vec3d& rvec) {
+        cv::Mat Rmat;
+        cv::Rodrigues(rvec, Rmat);
+        Eigen::Matrix3d m;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                m(r, c) = Rmat.at<double>(r, c);
+            }
+        }
+        return Eigen::Quaterniond(m);
+    }
+
+    inline cv::Vec3d quatToRvec(const Eigen::Quaterniond& q) {
+        Eigen::AngleAxisd aa(q.normalized());
+        Eigen::Vector3d axis = aa.axis();
+        double angle = aa.angle();
+        return cv::Vec3d(axis.x() * angle, axis.y() * angle, axis.z() * angle);
+    }
+
+    inline cv::Vec3d quatToRpyDeg(const Eigen::Quaterniond& q) {
+        Eigen::Matrix3d m = q.normalized().toRotationMatrix();
+        const double roll = std::atan2(m(2, 1), m(2, 2));
+        const double pitch = std::asin(std::clamp(-m(2, 0), -1.0, 1.0));
+        const double yaw = std::atan2(m(1, 0), m(0, 0));
+        return cv::Vec3d(roll * 180.0 / M_PI,
+                         pitch * 180.0 / M_PI,
+                         yaw * 180.0 / M_PI);
+    }
+
+    inline std::pair<double, double> txTyFromTvec(const cv::Vec3d& tvec) {
+        const double z = std::max(1e-6, tvec[2]);
+        const double tx = std::atan2(tvec[0], z) * 180.0 / M_PI;
+        const double ty = std::atan2(-tvec[1], z) * 180.0 / M_PI;
+        return {tx, ty};
+    }
 } // namespace
 // --------------------------------------------------------------------------
 
@@ -92,11 +204,37 @@ FrameProcessor::FrameProcessor()
     , useBlacklist_(false)
     , sceneHasUnseen_(false)
     , detectionRate_(config::DETECTION_RATE_HZ)
+    , frameCounter_(0)
     , emaPosAlpha_(config::EMA_ALPHA_POS)
     , emaPoseAlpha_(config::EMA_ALPHA_POSE)
+    , fastModeCounter_(0)
+    , fastModeActive_(false)
 {
     detector_ = std::make_unique<Detector>();
     poseEstimator_ = std::make_unique<PoseEstimator>();
+    arucoHelper_ = std::make_unique<ArucoPoseHelper>();
+    camToRobotR_ = rpyDegToMatrix(config::CAMERA_TO_ROBOT_ROLL_DEG,
+                                  config::CAMERA_TO_ROBOT_PITCH_DEG,
+                                  config::CAMERA_TO_ROBOT_YAW_DEG);
+    camToRobotT_ = cv::Vec3d(config::CAMERA_TO_ROBOT_X,
+                             config::CAMERA_TO_ROBOT_Y,
+                             config::CAMERA_TO_ROBOT_Z);
+    robotToCamR_ = camToRobotR_.t();
+    robotToCamT_ = -matMul(robotToCamR_, camToRobotT_);
+
+    std::string layoutPath = config::FIELD_LAYOUT_PATH ? config::FIELD_LAYOUT_PATH : "";
+    fieldLayout_ = std::make_unique<FieldLayout>();
+    bool layoutLoaded = false;
+    if (!layoutPath.empty()) {
+        layoutLoaded |= fieldLayout_->loadFromJson(layoutPath);
+    }
+    if (config::FIELD_LAYOUT_INCLUDE_REEFSCAPE && config::FIELD_LAYOUT_REEFSCAPE_PATH) {
+        std::string reef = config::FIELD_LAYOUT_REEFSCAPE_PATH;
+        if (!reef.empty() && reef != layoutPath) {
+            layoutLoaded |= fieldLayout_->appendFromJson(reef);
+        }
+    }
+    fieldLayoutReady_ = layoutLoaded;
 
     clahe_ = cv::createCLAHE(config::CLAHE_CLIP_LIMIT,
                              cv::Size(config::CLAHE_TILE_SIZE, config::CLAHE_TILE_SIZE));
@@ -137,6 +275,91 @@ void FrameProcessor::buildGammaLUT(double gamma) {
     }
 }
 
+void FrameProcessor::applyTemporalDenoise(cv::Mat& img) {
+    if (img.empty()) {
+        return;
+    }
+    cv::Mat floatImg;
+    img.convertTo(floatImg, CV_32F);
+    if (temporalLowpass_.empty() || temporalLowpass_.size() != img.size()) {
+        floatImg.copyTo(temporalLowpass_);
+    } else {
+        cv::accumulateWeighted(floatImg, temporalLowpass_, config::TEMPORAL_DENOISE_ALPHA);
+    }
+    cv::Mat blended;
+    temporalLowpass_.convertTo(blended, img.type());
+    cv::addWeighted(img, config::TEMPORAL_DENOISE_MIX,
+                    blended, 1.0 - config::TEMPORAL_DENOISE_MIX,
+                    0.0, img);
+}
+
+void FrameProcessor::applySpecularSuppression(cv::Mat& img) {
+    if (img.empty()) {
+        return;
+    }
+    const int medianSize = std::max(3, config::SPECULAR_MEDIAN_SIZE | 1);
+    cv::Mat median;
+    cv::medianBlur(img, median, medianSize);
+    cv::Mat diff;
+    cv::absdiff(img, median, diff);
+    if (glareMask_.empty() || glareMask_.size() != img.size()) {
+        glareMask_.create(img.size(), CV_8UC1);
+    }
+    cv::threshold(diff, glareMask_, config::SPECULAR_THRESHOLD, 255, cv::THRESH_BINARY);
+    if (config::SPECULAR_DILATE_ITER > 0) {
+        const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
+        cv::dilate(glareMask_, glareMask_, kernel, cv::Point(-1, -1), config::SPECULAR_DILATE_ITER);
+    }
+    if (config::SPECULAR_ERODE_ITER > 0) {
+        const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
+        cv::erode(glareMask_, glareMask_, kernel, cv::Point(-1, -1), config::SPECULAR_ERODE_ITER);
+    }
+    glareSuppressedThisFrame_ = cv::countNonZero(glareMask_) > 0;
+    if (!glareSuppressedThisFrame_) {
+        glareMask_.setTo(0);
+        return;
+    }
+    const int diameter = std::max(3, config::SPECULAR_BILATERAL_DIAMETER | 1);
+    cv::Mat smooth;
+    cv::bilateralFilter(img, smooth, diameter,
+                        config::SPECULAR_BILATERAL_SIGMA,
+                        config::SPECULAR_BILATERAL_SIGMA);
+    cv::Mat blended;
+    cv::addWeighted(img, 1.0 - config::SPECULAR_SUPPRESS_GAIN,
+                    smooth, config::SPECULAR_SUPPRESS_GAIN,
+                    0.0, blended);
+    blended.copyTo(img, glareMask_);
+}
+
+double FrameProcessor::computeGlareFraction(const std::vector<cv::Point2f>& corners) const {
+    if (glareMask_.empty() || corners.empty()) {
+        return 0.0;
+    }
+    cv::Rect bounds = cv::boundingRect(corners);
+    bounds = clampRect(bounds, glareMask_.cols, glareMask_.rows);
+    if (bounds.width <= 0 || bounds.height <= 0) {
+        return 0.0;
+    }
+    const cv::Mat roi = glareMask_(bounds);
+    const int glarePx = cv::countNonZero(roi);
+    const double total = static_cast<double>(bounds.area());
+    if (total <= 0.0) {
+        return 0.0;
+    }
+    return std::clamp(glarePx / total, 0.0, 1.0);
+}
+
+void FrameProcessor::updateFastMode(double procTimeMs) {
+    const double targetMs = 1000.0 / std::max(30.0, detectionRate_);
+    const double trigger = std::max(config::FAST_MODE_TRIGGER_MS, targetMs * 1.05);
+    if (procTimeMs > trigger) {
+        fastModeCounter_ = config::FAST_MODE_RECOVERY_FRAMES;
+    } else if (fastModeCounter_ > 0) {
+        --fastModeCounter_;
+    }
+    fastModeActive_ = fastModeCounter_ > 0;
+}
+
 cv::Mat FrameProcessor::preprocessImage(const cv::Mat& gray) {
     if (preprocessBuf_.empty() || preprocessBuf_.size() != gray.size()) {
         preprocessBuf_.create(gray.size(), gray.type());
@@ -150,6 +373,17 @@ cv::Mat FrameProcessor::preprocessImage(const cv::Mat& gray) {
 
     if (std::abs(gamma_ - 1.0) > 1e-3) {
         cv::LUT(preprocessBuf_, gammaLUT_, preprocessBuf_);
+    }
+
+    if (config::ENABLE_TEMPORAL_DENOISE) {
+        applyTemporalDenoise(preprocessBuf_);
+    }
+
+    glareSuppressedThisFrame_ = false;
+    if (config::ENABLE_SPECULAR_SUPPRESSION) {
+        applySpecularSuppression(preprocessBuf_);
+    } else if (!glareMask_.empty()) {
+        glareMask_.setTo(0);
     }
 
     return preprocessBuf_;
@@ -175,8 +409,103 @@ bool FrameProcessor::shouldProcessTag(int id) {
     return true;
 }
 
+std::vector<Detection> FrameProcessor::detectWithStrategy(const cv::Mat& grayProc) {
+    ++frameCounter_;
+
+    const int width = grayProc.cols;
+    const int height = grayProc.rows;
+    std::vector<cv::Rect> rois = buildDynamicRois(width, height);
+    const bool needFullFrame = rois.empty() ||
+        (config::ROI_FULL_FRAME_INTERVAL > 0 &&
+         (frameCounter_ % static_cast<size_t>(config::ROI_FULL_FRAME_INTERVAL) == 0));
+
+    std::vector<Detection> detections;
+    if (!needFullFrame) {
+        std::vector<Detection> roiDets;
+        for (const auto& roi : rois) {
+            auto det = detector_->detectROI(grayProc, roi);
+            roiDets.insert(roiDets.end(), det.begin(), det.end());
+        }
+        detections = mergeDetectionsById(roiDets);
+    }
+
+    if (detections.empty()) {
+        detections = detector_->detect(grayProc);
+    }
+
+    return detections;
+}
+
+std::vector<cv::Rect> FrameProcessor::buildDynamicRois(int width, int height) const {
+    std::vector<std::pair<double, cv::Rect>> prioritized;
+    prioritized.reserve(trackers_.size());
+
+    for (const auto& [id, tracker] : trackers_) {
+        (void)id;
+        if (!tracker) continue;
+        auto state = tracker->get();
+        if (!state) continue;
+
+        double cx, cy, diag;
+        std::tie(cx, cy, diag) = *state;
+        diag = std::clamp(diag, config::MIN_SCALE_PX, config::MAX_SCALE_PX);
+
+        double margin = std::max(config::ROI_MIN_MARGIN_PX, diag * config::ROI_MARGIN_RATIO);
+        if (auto fullState = tracker->getState()) {
+            const double vx = (*fullState)(3);
+            const double vy = (*fullState)(4);
+            const double speed = std::sqrt(vx * vx + vy * vy);
+            margin += speed * config::ROI_VELOCITY_MARGIN_SCALE;
+        }
+        margin = std::clamp(margin, config::ROI_MIN_MARGIN_PX, config::ROI_MAX_MARGIN_PX);
+
+        const double halfSpan = (diag * 0.5) + margin;
+        const int x0 = static_cast<int>(std::floor(cx - halfSpan));
+        const int y0 = static_cast<int>(std::floor(cy - halfSpan));
+        const int size = static_cast<int>(std::ceil(halfSpan * 2.0));
+        cv::Rect roi(x0, y0, size, size);
+        roi = clampRect(roi, width, height);
+        if (roi.width <= 0 || roi.height <= 0) continue;
+        prioritized.emplace_back(halfSpan, roi);
+    }
+
+    std::sort(prioritized.begin(), prioritized.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+    if (prioritized.size() > static_cast<size_t>(config::ROI_MAX_COUNT)) {
+        prioritized.resize(config::ROI_MAX_COUNT);
+    }
+
+    std::vector<cv::Rect> rois;
+    rois.reserve(prioritized.size());
+    for (const auto& entry : prioritized) {
+        rois.push_back(entry.second);
+    }
+    return rois;
+}
+
+std::vector<Detection> FrameProcessor::mergeDetectionsById(const std::vector<Detection>& dets) const {
+    std::unordered_map<int, std::pair<double, Detection>> best;
+    for (const auto& det : dets) {
+        if (det.corners.size() < 4) continue;
+        const double diag = cv::norm(det.corners[0] - det.corners[2]);
+        const double score = det.decision_margin + 0.001 * diag;
+        auto it = best.find(det.id);
+        if (it == best.end() || score > it->second.first) {
+            best[det.id] = std::make_pair(score, det);
+        }
+    }
+
+    std::vector<Detection> out;
+    out.reserve(best.size());
+    for (const auto& kv : best) {
+        out.push_back(kv.second.second);
+    }
+    return out;
+}
+
 cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stats) {
     auto t0 = std::chrono::high_resolution_clock::now();
+    auto frameTimestamp = std::chrono::steady_clock::now();
 
     if (frame.empty()) {
         return cv::Mat();
@@ -184,6 +513,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
 
     const int h = frame.rows;
     const int w = frame.cols;
+    const bool fastMode = fastModeActive_;
 
     // Initialize camera matrix if needed
     if (cameraMatrix_.empty()) {
@@ -213,7 +543,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
     detector_->setDecimate(static_cast<float>(decimate));
 
     // Detect tags ON THE SAME IMAGE we'll refine on
-    std::vector<Detection> detections = detector_->detect(grayProc);
+    std::vector<Detection> detections = detectWithStrategy(grayProc);
 
     // Filter detections
     std::vector<Detection> filtered;
@@ -237,11 +567,26 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         // Order corners & compute polygon area
         std::vector<cv::Point2f> corners = PoseEstimator::orderCorners(det.corners);
         const double area = PoseEstimator::polygonArea(corners);
+        double centroidX = 0.0, centroidY = 0.0;
+        for (const auto& pt : corners) {
+            centroidX += pt.x;
+            centroidY += pt.y;
+        }
+        if (!corners.empty()) {
+            centroidX /= corners.size();
+            centroidY /= corners.size();
+        }
+        double diagPx = 0.0;
+        if (corners.size() >= 4) {
+            diagPx = cv::norm(corners[0] - corners[2]);
+        }
 
         // ---- Safe sub-pixel refinement on the SAME image/scale used for detection ----
         // Prevents: OpenCV(…) error: Rect(0,0,src.cols,src.rows).contains(cT) in cv::cornerSubPix
         // (points must be inside the image; we skip those too close to borders). :contentReference[oaicite:3]{index=3}
-        if (area > 30.0) {
+        const bool allowSubpix = !fastMode || !config::FAST_MODE_SKIP_REFINEMENT ||
+                                 diagPx >= config::FAST_MODE_MIN_SUBPIX_DIAG;
+        if (area > 30.0 && allowSubpix) {
             const cv::Size subWin(config::CORNER_SUBPIX_WIN, config::CORNER_SUBPIX_WIN);
             const int margin = std::max(subWin.width, subWin.height) / 2;
 
@@ -269,18 +614,43 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
             auto poseResult = poseEstimator_->solvePose(corners, tagSizeM_,
                                                         cameraMatrix_, distCoeffs_);
             if (poseResult) {
+                cv::Vec3d fusedTvec = poseResult->tvec;
+                cv::Vec3d fusedRvec = poseResult->rvec;
+                double fusedError = poseResult->reprojError;
+
+                // Optional ArUco refinement to stabilize pose estimates at long range
+                cv::Vec3d arucoR, arucoT;
+                double arucoErr = 0.0;
+                if (arucoHelper_ && arucoHelper_->estimatePose(corners, tagSizeM_,
+                                                               cameraMatrix_, distCoeffs_,
+                                                               arucoR, arucoT, arucoErr)) {
+                    const double wApril = 1.0 / std::max(1e-3, fusedError);
+                    const double wAruco = 1.0 / std::max(1e-3, arucoErr);
+                    const double sumW = wApril + wAruco;
+                    const double weightApril = wApril / sumW;
+                    const double weightAruco = wAruco / sumW;
+
+                    fusedTvec = cv::Vec3d(
+                        weightApril * fusedTvec[0] + weightAruco * arucoT[0],
+                        weightApril * fusedTvec[1] + weightAruco * arucoT[1],
+                        weightApril * fusedTvec[2] + weightAruco * arucoT[2]
+                    );
+                    fusedRvec = PoseEstimator::blendRvecs(fusedRvec, arucoR, weightApril);
+                    fusedError = (weightApril * fusedError) + (weightAruco * arucoErr);
+                }
+
                 // Smooth position
                 auto& posSmooth = posSmoothers_[det.id];
                 if (!posSmooth || std::abs(posSmooth->getAlpha() - emaPosAlpha_) > 1e-9)
                     posSmooth = std::make_unique<EMASmoother>(emaPosAlpha_);
-                Eigen::Vector3d tvecE(poseResult->tvec[0], poseResult->tvec[1], poseResult->tvec[2]);
+                Eigen::Vector3d tvecE(fusedTvec[0], fusedTvec[1], fusedTvec[2]);
                 Eigen::VectorXd sPos = posSmooth->update(tvecE);
 
                 // Smooth orientation
                 auto& poseSmooth = poseSmoothers_[det.id];
                 if (!poseSmooth || std::abs(poseSmooth->getAlpha() - emaPoseAlpha_) > 1e-9)
                     poseSmooth = std::make_unique<EMASmoother>(emaPoseAlpha_);
-                Eigen::Vector3d rvecE(poseResult->rvec[0], poseResult->rvec[1], poseResult->rvec[2]);
+                Eigen::Vector3d rvecE(fusedRvec[0], fusedRvec[1], fusedRvec[2]);
                 Eigen::VectorXd sRot = poseSmooth->update(rvecE);
 
                 // Median filter if enabled
@@ -301,13 +671,74 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
                     rvec = cv::Vec3d(sRot(0), sRot(1), sRot(2));
                 }
 
-                reprojErr = poseResult->reprojError;
+                reprojErr = fusedError;
 
-                TagData td;
-                td.id = det.id;
-                td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta_percent;
-                td.tvec = tvec; td.rvec = rvec; td.reprojError = reprojErr;
-                tagDataList.push_back(td);
+        TagData td;
+        td.id = det.id;
+        td.tx_deg = tx_deg;
+        td.ty_deg = ty_deg;
+        td.ta_percent = ta_percent;
+        td.tvec = tvec;
+        td.rvec = rvec;
+        td.rawTvec = tvec;
+        td.rawRvec = rvec;
+        td.filteredTvec = tvec;
+        td.filteredRvec = rvec;
+        td.filteredRpyDeg = cv::Vec3d();
+        td.velocityMps = cv::Vec3d();
+        td.accelMps2 = cv::Vec3d();
+        td.latencyCompMs = 0.0;
+        td.predictedPoseOnly = false;
+        td.reprojError = reprojErr;
+        td.poseAmbiguity = std::clamp(reprojErr / std::max(1e-3, config::POSE_AMBIGUITY_SCALE), 0.0, 1.0);
+        td.decisionMargin = det.decision_margin;
+        td.areaPx = area;
+        const auto [shortSide, longSide] = computeSideExtents(corners);
+        td.shortSidePx = shortSide;
+        td.longSidePx = longSide;
+        const cv::Rect bounds = cv::boundingRect(corners);
+        const double glareRatio = computeGlareFraction(corners);
+        td.boundingWidthPx = static_cast<double>(bounds.width);
+        td.boundingHeightPx = static_cast<double>(bounds.height);
+        td.skewDeg = computeSkewDeg(corners);
+        const double distanceM = std::sqrt(tvec[0] * tvec[0] +
+                                           tvec[1] * tvec[1] +
+                                           tvec[2] * tvec[2]);
+        const double fx = cameraMatrix_.at<double>(0, 0);
+        const double fy = cameraMatrix_.at<double>(1, 1);
+        const double cx0 = cameraMatrix_.at<double>(0, 2);
+        const double cy0 = cameraMatrix_.at<double>(1, 2);
+        double predictedTx = tx_deg;
+        double predictedTy = ty_deg;
+        double stability = 1.0;
+        auto trackerIt = trackers_.find(det.id);
+        if (trackerIt != trackers_.end()) {
+            if (auto state = trackerIt->second->getState()) {
+                const double vx = (*state)(3);
+                const double vy = (*state)(4);
+                const double speed = std::sqrt(vx * vx + vy * vy);
+                stability = std::clamp(1.0 - config::TARGET_STABILITY_DECAY * speed, 0.0, 1.0);
+                const double leadSeconds = config::AUTOALIGN_LEAD_TIME_MS / 1000.0;
+                const double predictedCx = centroidX + vx * leadSeconds;
+                const double predictedCy = centroidY + vy * leadSeconds;
+                predictedTx = std::atan2(predictedCx - cx0, fx) * 180.0 / M_PI;
+                predictedTy = std::atan2(cy0 - predictedCy, fy) * 180.0 / M_PI;
+            }
+        }
+        stability *= (1.0 - td.poseAmbiguity);
+        stability *= std::clamp(1.0 - glareRatio * config::GLARE_STABILITY_WEIGHT, 0.0, 1.0);
+        for (size_t i = 0; i < td.corners.size(); ++i) {
+            if (i < corners.size()) td.corners[i] = corners[i];
+            else td.corners[i] = cv::Point2f();
+        }
+        td.distanceM = distanceM;
+        td.closingVelocityMps = 0.0;
+        td.stabilityScore = stability;
+        td.predictedTxDeg = predictedTx;
+        td.predictedTyDeg = predictedTy;
+        td.timeToImpactMs = 0.0;
+        td.glareFraction = glareRatio;
+        tagDataList.push_back(td);
             }
         }
 
@@ -335,6 +766,8 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
                 poseMedians_.clear();
                 lastCorners_.clear();
                 lkLastPts_.clear();
+                distanceHistory_.clear();
+                poseFilters_.clear();
                 sceneHasUnseen_ = false;
             }
         }
@@ -348,18 +781,37 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
     // Store current frame for optical flow
     gray.copyTo(prevGray_);
 
+    auto t1 = std::chrono::high_resolution_clock::now();
+    const double procTimeMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    const double pipelineLatencyMs = procTimeMs + config::PIPELINE_EXTRA_LATENCY_MS;
+
+    applyPoseFilters(tagDataList, pipelineLatencyMs, visibleIds, frameTimestamp);
+
     // Publish
     if (publisher_ && !tagDataList.empty()) {
+        int bestIndex = -1;
+        auto bestSummary = selectBestTarget(tagDataList, w, h, bestIndex);
+        std::optional<MultiTagSolution> multiTagSolution;
+        if (!(fastMode && config::FAST_MODE_SKIP_MULTITAG)) {
+            multiTagSolution = solveFieldPose(tagDataList);
+        }
         VisionPayload payload;
         payload.timestamp = std::chrono::duration<double>(
             std::chrono::system_clock::now().time_since_epoch()).count();
+        payload.pipelineLatencyMs = pipelineLatencyMs;
         payload.tags = tagDataList;
+        payload.bestTarget = bestSummary;
+        payload.bestTagIndex = bestIndex;
+        payload.multiTag = multiTagSolution;
+        payload.detectionRateHz = detectionRate_;
+        payload.fastModeActive = fastMode;
+        payload.glareSuppressed = glareSuppressedThisFrame_;
         publisher_->publish(payload);
     }
 
+    updateFastMode(procTimeMs);
+
     // Stats
-    auto t1 = std::chrono::high_resolution_clock::now();
-    const double procTimeMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
     processTimeHist_.push_back(procTimeMs);
     if (processTimeHist_.size() > 30) processTimeHist_.pop_front();
@@ -526,7 +978,341 @@ void FrameProcessor::purgeOldTrackers(const std::set<int>& visibleIds) {
         poseMedians_.erase(id);
         lastCorners_.erase(id);
         lkLastPts_.erase(id);
+        distanceHistory_.erase(id);
+        dropPoseFilter(id);
     }
+}
+
+double FrameProcessor::updateDistanceHistory(int id, double distanceM) {
+    const auto now = std::chrono::steady_clock::now();
+    double velocity = 0.0;
+    auto it = distanceHistory_.find(id);
+    if (it != distanceHistory_.end()) {
+        const double dt = std::chrono::duration<double>(now - it->second.timestamp).count();
+        if (dt > 1e-4) {
+            velocity = (it->second.distance - distanceM) / dt;
+        }
+    }
+    distanceHistory_[id] = DistanceHistory{distanceM, velocity, now};
+    return velocity;
+}
+
+void FrameProcessor::applyPoseFilters(std::vector<TagData>& tags,
+                                      double pipelineLatencyMs,
+                                      const std::set<int>& visibleIds,
+                                      std::chrono::steady_clock::time_point frameTime) {
+    const double latencySec = pipelineLatencyMs / 1000.0;
+    for (auto& tag : tags) {
+        auto filterOut = stepPoseFilter(tag.id, tag.rawTvec, tag.rawRvec,
+                                        latencySec, frameTime);
+        tag.filteredTvec = filterOut.filteredTranslation;
+        tag.filteredRvec = filterOut.filteredRvec;
+        tag.filteredRpyDeg = filterOut.filteredRpyDeg;
+        tag.tvec = filterOut.predictedTranslation;
+        tag.rvec = filterOut.filteredRvec;
+        tag.velocityMps = filterOut.velocity;
+        tag.accelMps2 = filterOut.acceleration;
+        tag.latencyCompMs = pipelineLatencyMs;
+        tag.predictedPoseOnly = filterOut.predictionOnly;
+        auto [txLead, tyLead] = txTyFromTvec(tag.tvec);
+        tag.tx_deg = txLead;
+        tag.ty_deg = tyLead;
+        tag.distanceM = std::sqrt(tag.tvec[0] * tag.tvec[0] +
+                                  tag.tvec[1] * tag.tvec[1] +
+                                  tag.tvec[2] * tag.tvec[2]);
+        tag.closingVelocityMps = updateDistanceHistory(tag.id, tag.distanceM);
+        if (tag.closingVelocityMps > 1e-3) {
+            tag.timeToImpactMs = std::max(0.0, (tag.distanceM / tag.closingVelocityMps) * 1000.0);
+        } else {
+            tag.timeToImpactMs = 0.0;
+        }
+        if (tag.predictedPoseOnly) {
+            tag.stabilityScore *= config::PREDICTED_STABILITY_PENALTY;
+        }
+    }
+
+    auto held = emitPredictedTags(visibleIds, latencySec,
+                                  pipelineLatencyMs, frameTime);
+    tags.insert(tags.end(), held.begin(), held.end());
+}
+
+FilterOutput FrameProcessor::stepPoseFilter(int id,
+                                            const std::optional<cv::Vec3d>& translation,
+                                            const std::optional<cv::Vec3d>& rvec,
+                                            double latencySec,
+                                            std::chrono::steady_clock::time_point timestamp) {
+    FilterOutput output;
+    auto& state = poseFilters_[id];
+    bool hadState = state.initialized;
+    double dt = 0.0;
+    if (state.initialized) {
+        if (state.lastUpdate.time_since_epoch().count() != 0) {
+            dt = std::chrono::duration<double>(timestamp - state.lastUpdate).count();
+            if (dt < 0.0) dt = 0.0;
+        }
+    }
+
+    cv::Vec3d predictedPos = state.position;
+    cv::Vec3d predictedVel = state.velocity;
+    cv::Vec3d predictedAcc = state.acceleration;
+
+    if (state.initialized && dt > 0.0) {
+        predictedPos = state.position + state.velocity * dt +
+                       state.acceleration * (0.5 * dt * dt);
+        predictedVel = state.velocity + state.acceleration * dt;
+    }
+
+    if (!state.initialized && translation) {
+        predictedPos = *translation;
+        predictedVel = cv::Vec3d(0.0, 0.0, 0.0);
+        predictedAcc = cv::Vec3d(0.0, 0.0, 0.0);
+        state.initialized = true;
+        state.lastMeasurement = timestamp;
+    }
+
+    state.position = predictedPos;
+    state.velocity = predictedVel;
+    state.acceleration = predictedAcc;
+    state.lastUpdate = timestamp;
+
+    bool measurementUsed = false;
+    if (translation && state.initialized) {
+        cv::Vec3d residual = *translation - predictedPos;
+        cv::Vec3d weighted = residual;
+        weighted[2] *= config::FILTER_DEPTH_WEIGHT;
+        const double residNorm = cv::norm(weighted);
+        const double impliedVel = (dt > 1e-3) ? cv::norm(residual) / dt : 0.0;
+        if (residNorm <= config::FILTER_OUTLIER_TRANSLATION_M &&
+            impliedVel <= config::FILTER_OUTLIER_VEL_MPS) {
+            const double denomDt = std::max(dt, 1e-3);
+            const double denomAcc = std::max(0.5 * dt * dt, 1e-3);
+            state.position = predictedPos + config::FILTER_ALPHA * residual;
+            state.velocity = predictedVel + (config::FILTER_BETA * residual) / denomDt;
+            state.acceleration = predictedAcc + (config::FILTER_GAMMA * residual) / denomAcc;
+            state.lastMeasurement = timestamp;
+            measurementUsed = true;
+        }
+    }
+
+    if (translation && !hadState && state.initialized) {
+        measurementUsed = true;
+    }
+
+    if (measurementUsed && rvec) {
+        Eigen::Quaterniond measQuat = rvecToQuat(*rvec);
+        if (!state.orientationInitialized) {
+            state.orientation = measQuat;
+            state.orientationInitialized = true;
+        } else {
+            Eigen::Quaterniond delta = state.orientation.conjugate() * measQuat;
+            double angleDeg = std::abs(Eigen::AngleAxisd(delta).angle()) * 180.0 / M_PI;
+            if (angleDeg <= config::FILTER_ORIENTATION_OUTLIER_DEG) {
+                state.orientation = state.orientation.slerp(
+                    config::FILTER_ORIENTATION_ALPHA, measQuat);
+            }
+        }
+    } else if (translation && rvec && !state.orientationInitialized) {
+        state.orientation = rvecToQuat(*rvec);
+        state.orientationInitialized = true;
+    }
+
+    output.filteredTranslation = state.position;
+    output.velocity = state.velocity;
+    output.acceleration = state.acceleration;
+    const double lead = std::max(0.0, latencySec);
+    output.predictedTranslation = state.position + state.velocity * lead +
+                                  state.acceleration * (0.5 * lead * lead);
+    Eigen::Quaterniond orientation = state.orientationInitialized ?
+        state.orientation : Eigen::Quaterniond::Identity();
+    output.filteredRvec = quatToRvec(orientation);
+    output.filteredRpyDeg = quatToRpyDeg(orientation);
+    output.usedMeasurement = measurementUsed;
+    output.predictionOnly = !measurementUsed;
+    return output;
+}
+
+std::vector<TagData> FrameProcessor::emitPredictedTags(
+    const std::set<int>& visibleIds,
+    double latencySec,
+    double pipelineLatencyMs,
+    std::chrono::steady_clock::time_point frameTime) {
+    std::vector<TagData> predicted;
+    for (auto& [id, state] : poseFilters_) {
+        if (!state.initialized) continue;
+        if (visibleIds.find(id) != visibleIds.end()) continue;
+        if (state.lastMeasurement.time_since_epoch().count() == 0) continue;
+        const double unseenMs = std::chrono::duration<double, std::milli>(
+            frameTime - state.lastMeasurement).count();
+        if (unseenMs > config::FILTER_PREDICT_HOLD_MS) continue;
+
+        auto out = stepPoseFilter(id, std::nullopt, std::nullopt,
+                                  latencySec, frameTime);
+        TagData td{};
+        td.id = id;
+        td.ta_percent = 0.0;
+        td.areaPx = 0.0;
+        td.shortSidePx = 0.0;
+        td.longSidePx = 0.0;
+        td.boundingWidthPx = 0.0;
+        td.boundingHeightPx = 0.0;
+        td.skewDeg = 0.0;
+        td.reprojError = 0.0;
+        td.poseAmbiguity = 1.0;
+        td.decisionMargin = 0.0;
+        td.glareFraction = 0.0;
+        td.predictedPoseOnly = true;
+        td.latencyCompMs = pipelineLatencyMs;
+        td.tvec = out.predictedTranslation;
+        td.filteredTvec = out.filteredTranslation;
+        td.rawTvec = out.filteredTranslation;
+        td.rvec = out.filteredRvec;
+        td.filteredRvec = out.filteredRvec;
+        td.rawRvec = out.filteredRvec;
+        td.filteredRpyDeg = out.filteredRpyDeg;
+        td.velocityMps = out.velocity;
+        td.accelMps2 = out.acceleration;
+        auto [txLead, tyLead] = txTyFromTvec(td.tvec);
+        td.tx_deg = txLead;
+        td.ty_deg = tyLead;
+        td.predictedTxDeg = txLead;
+        td.predictedTyDeg = tyLead;
+        td.distanceM = std::sqrt(td.tvec[0] * td.tvec[0] +
+                                  td.tvec[1] * td.tvec[1] +
+                                  td.tvec[2] * td.tvec[2]);
+        td.closingVelocityMps = updateDistanceHistory(id, td.distanceM);
+        if (td.closingVelocityMps > 1e-3) {
+            td.timeToImpactMs = std::max(0.0, (td.distanceM / td.closingVelocityMps) * 1000.0);
+        } else {
+            td.timeToImpactMs = 0.0;
+        }
+        td.stabilityScore = config::PREDICTED_STABILITY_PENALTY;
+        for (auto& corner : td.corners) {
+            corner = cv::Point2f();
+        }
+        predicted.push_back(td);
+    }
+    return predicted;
+}
+
+void FrameProcessor::dropPoseFilter(int id) {
+    poseFilters_.erase(id);
+}
+
+std::optional<TargetSummary> FrameProcessor::selectBestTarget(const std::vector<TagData>& tags,
+                                                             int width, int height, int& bestIndex) {
+    (void)width; (void)height;
+    bestIndex = -1;
+    if (tags.empty()) {
+        return std::nullopt;
+    }
+
+    double bestScore = -std::numeric_limits<double>::infinity();
+    TargetSummary summary;
+
+    for (size_t i = 0; i < tags.size(); ++i) {
+        const auto& tag = tags[i];
+        const double distancePenalty = tag.distanceM * 0.15;
+        const double centerPenalty = (std::abs(tag.tx_deg) + 0.5 * std::abs(tag.ty_deg)) * 0.02;
+        const double areaScore = tag.ta_percent * 0.05;
+        const double marginScore = tag.decisionMargin * 0.6;
+        const double stabilityScore = tag.stabilityScore * 1.2;
+        const double ambiguityPenalty = tag.poseAmbiguity * 0.8;
+        const double glarePenalty = tag.glareFraction * config::GLARE_SCORE_WEIGHT;
+        const double score = marginScore + areaScore + stabilityScore - centerPenalty - distancePenalty - ambiguityPenalty - glarePenalty;
+        if (score > bestScore) {
+            bestScore = score;
+            bestIndex = static_cast<int>(i);
+            summary.id = tag.id;
+            summary.tx_deg = tag.tx_deg;
+            summary.ty_deg = tag.ty_deg;
+            summary.ta_percent = tag.ta_percent;
+            summary.distanceM = tag.distanceM;
+            summary.stability = tag.stabilityScore;
+            summary.predictedTxDeg = tag.predictedTxDeg;
+            summary.predictedTyDeg = tag.predictedTyDeg;
+            summary.closingVelocityMps = tag.closingVelocityMps;
+            summary.timeToImpactMs = tag.timeToImpactMs;
+            summary.tvec = tag.tvec;
+            summary.rvec = tag.rvec;
+            summary.corners = tag.corners;
+            summary.predictedPoseOnly = tag.predictedPoseOnly;
+            summary.latencyCompMs = tag.latencyCompMs;
+        }
+    }
+
+    if (bestIndex >= 0) {
+        return summary;
+    }
+    return std::nullopt;
+}
+
+std::optional<MultiTagSolution> FrameProcessor::solveFieldPose(const std::vector<TagData>& tags) {
+    if (!fieldLayoutReady_ || !fieldLayout_) {
+        return std::nullopt;
+    }
+
+    cv::Vec3d accumCam(0, 0, 0);
+    Eigen::Vector4d quatSum(0, 0, 0, 0);
+    double weightSum = 0.0;
+    double ambiguitySum = 0.0;
+    int used = 0;
+
+    for (const auto& tag : tags) {
+        if (tag.poseAmbiguity > config::MULTITAG_MAX_AMBIGUITY) continue;
+        auto poseOpt = fieldLayout_->getTagPose(tag.id);
+        if (!poseOpt) continue;
+        cv::Mat Rmat;
+        cv::Rodrigues(tag.rvec, Rmat);
+        const cv::Matx33d R_tc = matFromCv(Rmat);
+        const cv::Matx33d R_ct = R_tc.t();
+        const cv::Vec3d t_ct = -matMul(R_ct, tag.tvec);
+        const cv::Matx33d R_fc = poseOpt->rotation * R_ct;
+        const cv::Vec3d t_fc = matMul(poseOpt->rotation, t_ct) + poseOpt->translation;
+        const double weight = (1.0 - tag.poseAmbiguity) * (1.0 + tag.ta_percent * 0.01);
+        accumCam += weight * t_fc;
+        Eigen::Matrix3d eR;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                eR(r, c) = R_fc(r, c);
+            }
+        }
+        Eigen::Quaterniond q(eR);
+        if (q.w() < 0) {
+            q.coeffs() *= -1;
+        }
+        quatSum += weight * Eigen::Vector4d(q.w(), q.x(), q.y(), q.z());
+        weightSum += weight;
+        ambiguitySum += tag.poseAmbiguity;
+        ++used;
+    }
+
+    if (used < config::MULTITAG_MIN_COUNT || weightSum <= 1e-6) {
+        return std::nullopt;
+    }
+
+    cv::Vec3d camField = accumCam * (1.0 / weightSum);
+    Eigen::Quaterniond qAvg(quatSum(0), quatSum(1), quatSum(2), quatSum(3));
+    if (qAvg.norm() < 1e-6) {
+        return std::nullopt;
+    }
+    qAvg.normalize();
+    Eigen::Matrix3d eR = qAvg.toRotationMatrix();
+    cv::Matx33d R_fc;
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 3; ++c) {
+            R_fc(r, c) = eR(r, c);
+        }
+    }
+
+    MultiTagSolution solution;
+    solution.valid = true;
+    solution.tagCount = used;
+    solution.avgAmbiguity = ambiguitySum / used;
+    solution.cameraPoseField = camField;
+    solution.cameraRotField = R_fc;
+    solution.robotRotField = R_fc * robotToCamR_;
+    solution.robotPoseField = matMul(R_fc, robotToCamT_) + camField;
+    return solution;
 }
 
 void FrameProcessor::drawDetection(cv::Mat& vis, const Detection& det,

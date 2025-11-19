@@ -2,9 +2,12 @@
 
 #include "Detector.h"
 #include "PoseEstimator.h"
+#include "ArucoPoseHelper.h"
 #include "Tracker.h"
 #include "NetworkPublisher.h"
+#include "FieldLayout.h"
 #include <opencv2/opencv.hpp>
+#include <Eigen/Geometry>
 #include <memory>
 #include <map>
 #include <set>
@@ -12,12 +15,36 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <unordered_map>
+#include <optional>
 
 struct ProcessingStats {
     double detectionRateHz;
     double avgProcessTimeMs;
     int tagCount;
     double blurVariance;
+};
+
+struct FilterOutput {
+    cv::Vec3d filteredTranslation;
+    cv::Vec3d predictedTranslation;
+    cv::Vec3d velocity;
+    cv::Vec3d acceleration;
+    cv::Vec3d filteredRvec;
+    cv::Vec3d filteredRpyDeg;
+    bool usedMeasurement = false;
+    bool predictionOnly = false;
+};
+
+struct PoseFilterState {
+    cv::Vec3d position{0.0, 0.0, 0.0};
+    cv::Vec3d velocity{0.0, 0.0, 0.0};
+    cv::Vec3d acceleration{0.0, 0.0, 0.0};
+    Eigen::Quaterniond orientation = Eigen::Quaterniond::Identity();
+    bool initialized = false;
+    bool orientationInitialized = false;
+    std::chrono::steady_clock::time_point lastUpdate{};
+    std::chrono::steady_clock::time_point lastMeasurement{};
 };
 
 class FrameProcessor {
@@ -50,9 +77,15 @@ private:
     double computeBlurVariance(const cv::Mat& gray);
     int chooseDecimate(int base, double blurVar);
     void buildGammaLUT(double gamma);
+    void applyTemporalDenoise(cv::Mat& img);
+    void applySpecularSuppression(cv::Mat& img);
+    double computeGlareFraction(const std::vector<cv::Point2f>& corners) const;
 
     // Detection filtering
     bool shouldProcessTag(int id);
+    std::vector<Detection> detectWithStrategy(const cv::Mat& grayProc);
+    std::vector<cv::Rect> buildDynamicRois(int width, int height) const;
+    std::vector<Detection> mergeDetectionsById(const std::vector<Detection>& dets) const;
 
     // Tracking helpers
     void updateTracker(int id, const std::vector<cv::Point2f>& corners);
@@ -66,10 +99,30 @@ private:
                       const std::vector<cv::Point2f>& corners,
                       double tx, double ty, double ta, const cv::Vec3d& tvec);
     void drawPrediction(cv::Mat& vis, int id, double cx, double cy, double s, bool isOpticalFlow);
+    std::optional<TargetSummary> selectBestTarget(const std::vector<TagData>& tags,
+                                                 int width, int height, int& bestIndex);
+    std::optional<MultiTagSolution> solveFieldPose(const std::vector<TagData>& tags);
+    double updateDistanceHistory(int id, double distanceM);
+    void updateFastMode(double procTimeMs);
+    void applyPoseFilters(std::vector<TagData>& tags,
+                          double pipelineLatencyMs,
+                          const std::set<int>& visibleIds,
+                          std::chrono::steady_clock::time_point frameTime);
+    FilterOutput stepPoseFilter(int id,
+                                const std::optional<cv::Vec3d>& translation,
+                                const std::optional<cv::Vec3d>& rvec,
+                                double latencySec,
+                                std::chrono::steady_clock::time_point timestamp);
+    std::vector<TagData> emitPredictedTags(const std::set<int>& visibleIds,
+                                           double latencySec,
+                                           double pipelineLatencyMs,
+                                           std::chrono::steady_clock::time_point frameTime);
+    void dropPoseFilter(int id);
 
     // Members
     std::unique_ptr<Detector> detector_;
     std::unique_ptr<PoseEstimator> poseEstimator_;
+    std::unique_ptr<ArucoPoseHelper> arucoHelper_;
     std::shared_ptr<NetworkPublisher> publisher_;
 
     cv::Mat cameraMatrix_;
@@ -100,6 +153,14 @@ private:
     cv::Mat prevGray_;
     std::map<int, std::vector<cv::Point2f>> lkLastPts_;
 
+    struct DistanceHistory {
+        double distance = 0.0;
+        double velocity = 0.0;
+        std::chrono::steady_clock::time_point timestamp;
+    };
+    std::unordered_map<int, DistanceHistory> distanceHistory_;
+    std::unordered_map<int, PoseFilterState> poseFilters_;
+
     // Scene management
     std::chrono::steady_clock::time_point sceneUnseenStart_;
     bool sceneHasUnseen_;
@@ -107,6 +168,7 @@ private:
     // Adaptive control
     double detectionRate_;
     std::deque<double> processTimeHist_;
+    size_t frameCounter_ = 0;
 
     // EMA alphas
     double emaPosAlpha_;
@@ -115,4 +177,19 @@ private:
     // Buffers (reused to avoid allocation)
     cv::Mat grayBuf_;
     cv::Mat preprocessBuf_;
+    cv::Mat temporalLowpass_;
+    cv::Mat glareMask_;
+    bool glareSuppressedThisFrame_ = false;
+
+    // Field layout / extrinsics
+    std::unique_ptr<FieldLayout> fieldLayout_;
+    bool fieldLayoutReady_ = false;
+    cv::Matx33d camToRobotR_;
+    cv::Matx33d robotToCamR_;
+    cv::Vec3d camToRobotT_;
+    cv::Vec3d robotToCamT_;
+
+    // Fast-path scheduling
+    int fastModeCounter_ = 0;
+    bool fastModeActive_ = false;
 };

@@ -7,7 +7,15 @@
 #include <mutex>
 #include <atomic>
 #include <deque>
+#include <optional>
 #include <opencv2/opencv.hpp>
+#include <array>
+
+#ifdef USE_NTCORE
+#include <networktables/NetworkTableInstance.h>
+#include <networktables/NetworkTable.h>
+#include <networktables/NetworkTableEntry.h>
+#endif
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -27,12 +35,72 @@ struct TagData {
     double ta_percent;
     cv::Vec3d tvec;
     cv::Vec3d rvec;
+    cv::Vec3d rawTvec;
+    cv::Vec3d rawRvec;
+    cv::Vec3d filteredTvec;
+    cv::Vec3d filteredRvec;
+    cv::Vec3d filteredRpyDeg;
+    cv::Vec3d velocityMps;
+    cv::Vec3d accelMps2;
     double reprojError;
+    std::array<cv::Point2f, 4> corners;
+    double skewDeg;
+    double shortSidePx;
+    double longSidePx;
+    double boundingWidthPx;
+    double boundingHeightPx;
+    double areaPx;
+    double poseAmbiguity;
+    double decisionMargin;
+    double distanceM;
+    double closingVelocityMps;
+    double stabilityScore;
+    double predictedTxDeg;
+    double predictedTyDeg;
+    double timeToImpactMs;
+    double glareFraction = 0.0;
+    double latencyCompMs = 0.0;
+    bool predictedPoseOnly = false;
+};
+
+struct TargetSummary {
+    int id = -1;
+    double tx_deg = 0.0;
+    double ty_deg = 0.0;
+    double ta_percent = 0.0;
+    double distanceM = 0.0;
+    double stability = 0.0;
+    double predictedTxDeg = 0.0;
+    double predictedTyDeg = 0.0;
+    double closingVelocityMps = 0.0;
+    double timeToImpactMs = 0.0;
+    cv::Vec3d tvec;
+    cv::Vec3d rvec;
+    std::array<cv::Point2f, 4> corners;
+    bool predictedPoseOnly = false;
+    double latencyCompMs = 0.0;
+};
+
+struct MultiTagSolution {
+    bool valid = false;
+    int tagCount = 0;
+    double avgAmbiguity = 1.0;
+    cv::Vec3d cameraPoseField;
+    cv::Matx33d cameraRotField;
+    cv::Vec3d robotPoseField;
+    cv::Matx33d robotRotField;
 };
 
 struct VisionPayload {
     double timestamp;
+    double pipelineLatencyMs;
     std::vector<TagData> tags;
+    std::optional<TargetSummary> bestTarget;
+    int bestTagIndex = -1;
+    std::optional<MultiTagSolution> multiTag;
+    double detectionRateHz = 0.0;
+    bool fastModeActive = false;
+    bool glareSuppressed = false;
 };
 
 class NetworkPublisher {
@@ -56,6 +124,11 @@ private:
     void publishLoop();
     bool initUDP();
     void sendUDP(const std::string& json);
+    void publishNetworkTables(const VisionPayload& payload);
+
+#ifdef USE_NTCORE
+    void configureNetworkTables();
+#endif
 
     std::string ntServer_;
     std::string udpIp_;
@@ -73,6 +146,77 @@ private:
     int udpSocket_;
     struct sockaddr_in udpAddr_;
     bool udpInitialized_;
+
+#ifdef USE_NTCORE
+    nt::NetworkTableInstance ntInstance_;
+    std::shared_ptr<nt::NetworkTable> visionTable_;
+    std::shared_ptr<nt::NetworkTable> limelightTable_;
+    nt::NetworkTableEntry timestampEntry_;
+    nt::NetworkTableEntry latencyEntry_;
+    nt::NetworkTableEntry idsEntry_;
+    nt::NetworkTableEntry txEntry_;
+    nt::NetworkTableEntry tyEntry_;
+    nt::NetworkTableEntry taEntry_;
+    nt::NetworkTableEntry xyzEntry_;
+    nt::NetworkTableEntry xyzFilteredEntry_;
+    nt::NetworkTableEntry xyzRawEntry_;
+    nt::NetworkTableEntry rpyEntry_;
+    nt::NetworkTableEntry rpyRawEntry_;
+    nt::NetworkTableEntry velocityEntry_;
+    nt::NetworkTableEntry predictedEntry_;
+    nt::NetworkTableEntry poseLatencyEntry_;
+    nt::NetworkTableEntry distanceEntry_;
+    nt::NetworkTableEntry bestIdEntry_;
+    nt::NetworkTableEntry bestPoseEntry_;
+    nt::NetworkTableEntry bestRawPoseEntry_;
+    nt::NetworkTableEntry bestRpyEntry_;
+    nt::NetworkTableEntry bestDistanceEntry_;
+    nt::NetworkTableEntry bestLatencyEntry_;
+    nt::NetworkTableEntry bestPredictedEntry_;
+    nt::NetworkTableEntry connectedEntry_;
+    nt::NetworkTableEntry ambiguityEntry_;
+    nt::NetworkTableEntry bestTxPredEntry_;
+    nt::NetworkTableEntry bestTyPredEntry_;
+    nt::NetworkTableEntry bestTimeToImpactEntry_;
+    nt::NetworkTableEntry bestClosingVelEntry_;
+    nt::NetworkTableEntry bestStabilityEntry_;
+    nt::NetworkTableEntry multiTagCountEntry_;
+    nt::NetworkTableEntry multiTagAmbEntry_;
+    nt::NetworkTableEntry fpsEntry_;
+    nt::NetworkTableEntry fastModeEntry_;
+    nt::NetworkTableEntry glareEntry_;
+    nt::NetworkTableEntry llTvEntry_;
+    nt::NetworkTableEntry llTidEntry_;
+    nt::NetworkTableEntry llTsEntry_;
+    nt::NetworkTableEntry llTlEntry_;
+    nt::NetworkTableEntry llTshortEntry_;
+    nt::NetworkTableEntry llTlongEntry_;
+    nt::NetworkTableEntry llThorEntry_;
+    nt::NetworkTableEntry llTvertEntry_;
+    nt::NetworkTableEntry llPoseAmbEntry_;
+    nt::NetworkTableEntry llTargetPoseCamEntry_;
+    nt::NetworkTableEntry llTargetPoseRobotEntry_;
+    nt::NetworkTableEntry llCameraPoseRobotEntry_;
+    nt::NetworkTableEntry llCameraPoseTargetEntry_;
+    nt::NetworkTableEntry llBotPoseTargetEntry_;
+    nt::NetworkTableEntry llTcornXEntry_;
+    nt::NetworkTableEntry llTcornYEntry_;
+    nt::NetworkTableEntry llBotPoseBlueEntry_;
+    nt::NetworkTableEntry llBotPoseRedEntry_;
+    nt::NetworkTableEntry llBotPoseRobotEntry_;
+    nt::NetworkTableEntry llCameraPoseFieldEntry_;
+    nt::NetworkTableEntry llBestStabilityEntry_;
+    nt::NetworkTableEntry llFpsEntry_;
+    nt::NetworkTableEntry llFastModeEntry_;
+#endif
+
+#ifdef USE_NTCORE
+    cv::Matx33d camToRobotR_;
+    cv::Matx33d robotToCamR_;
+    cv::Vec3d camToRobotT_;
+    cv::Vec3d robotToCamT_;
+    bool ntConfigured_ = false;
+#endif
 
     static constexpr size_t MAX_QUEUE_SIZE = 8;
 };
