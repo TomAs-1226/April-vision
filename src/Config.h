@@ -100,6 +100,19 @@ inline constexpr double PROCESS_TIME_LOW_MS = 8.0;
 inline constexpr double AUTOALIGN_LEAD_TIME_MS = 50.0;
 inline constexpr double TARGET_STABILITY_DECAY = 0.08;
 
+// Latency + predictive filtering
+inline constexpr double PIPELINE_EXTRA_LATENCY_MS = 8.0;
+inline constexpr double FILTER_ALPHA = 0.55;
+inline constexpr double FILTER_BETA = 0.24;
+inline constexpr double FILTER_GAMMA = 0.08;
+inline constexpr double FILTER_DEPTH_WEIGHT = 0.45;
+inline constexpr double FILTER_OUTLIER_TRANSLATION_M = 0.35;
+inline constexpr double FILTER_OUTLIER_VEL_MPS = 9.5;
+inline constexpr double FILTER_ORIENTATION_ALPHA = 0.35;
+inline constexpr double FILTER_ORIENTATION_OUTLIER_DEG = 35.0;
+inline constexpr double FILTER_PREDICT_HOLD_MS = 320.0;
+inline constexpr double PREDICTED_STABILITY_PENALTY = 0.55;
+
 // Field layout / Limelight compatibility
 inline constexpr const char* FIELD_LAYOUT_PATH = "assets/2024-crescendo.json";
 inline constexpr const char* FIELD_LAYOUT_REEFSCAPE_PATH = "assets/2025-reefscape-welded.json";

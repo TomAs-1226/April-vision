@@ -7,6 +7,7 @@
 #include "NetworkPublisher.h"
 #include "FieldLayout.h"
 #include <opencv2/opencv.hpp>
+#include <Eigen/Geometry>
 #include <memory>
 #include <map>
 #include <set>
@@ -15,12 +16,35 @@
 #include <atomic>
 #include <chrono>
 #include <unordered_map>
+#include <optional>
 
 struct ProcessingStats {
     double detectionRateHz;
     double avgProcessTimeMs;
     int tagCount;
     double blurVariance;
+};
+
+struct FilterOutput {
+    cv::Vec3d filteredTranslation;
+    cv::Vec3d predictedTranslation;
+    cv::Vec3d velocity;
+    cv::Vec3d acceleration;
+    cv::Vec3d filteredRvec;
+    cv::Vec3d filteredRpyDeg;
+    bool usedMeasurement = false;
+    bool predictionOnly = false;
+};
+
+struct PoseFilterState {
+    cv::Vec3d position{0.0, 0.0, 0.0};
+    cv::Vec3d velocity{0.0, 0.0, 0.0};
+    cv::Vec3d acceleration{0.0, 0.0, 0.0};
+    Eigen::Quaterniond orientation = Eigen::Quaterniond::Identity();
+    bool initialized = false;
+    bool orientationInitialized = false;
+    std::chrono::steady_clock::time_point lastUpdate{};
+    std::chrono::steady_clock::time_point lastMeasurement{};
 };
 
 class FrameProcessor {
@@ -80,6 +104,20 @@ private:
     std::optional<MultiTagSolution> solveFieldPose(const std::vector<TagData>& tags);
     double updateDistanceHistory(int id, double distanceM);
     void updateFastMode(double procTimeMs);
+    void applyPoseFilters(std::vector<TagData>& tags,
+                          double pipelineLatencyMs,
+                          const std::set<int>& visibleIds,
+                          std::chrono::steady_clock::time_point frameTime);
+    FilterOutput stepPoseFilter(int id,
+                                const std::optional<cv::Vec3d>& translation,
+                                const std::optional<cv::Vec3d>& rvec,
+                                double latencySec,
+                                std::chrono::steady_clock::time_point timestamp);
+    std::vector<TagData> emitPredictedTags(const std::set<int>& visibleIds,
+                                           double latencySec,
+                                           double pipelineLatencyMs,
+                                           std::chrono::steady_clock::time_point frameTime);
+    void dropPoseFilter(int id);
 
     // Members
     std::unique_ptr<Detector> detector_;
@@ -121,6 +159,7 @@ private:
         std::chrono::steady_clock::time_point timestamp;
     };
     std::unordered_map<int, DistanceHistory> distanceHistory_;
+    std::unordered_map<int, PoseFilterState> poseFilters_;
 
     // Scene management
     std::chrono::steady_clock::time_point sceneUnseenStart_;

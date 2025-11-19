@@ -155,6 +155,42 @@ namespace {
 
         return Rz * Ry * Rx;
     }
+
+    inline Eigen::Quaterniond rvecToQuat(const cv::Vec3d& rvec) {
+        cv::Mat Rmat;
+        cv::Rodrigues(rvec, Rmat);
+        Eigen::Matrix3d m;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) {
+                m(r, c) = Rmat.at<double>(r, c);
+            }
+        }
+        return Eigen::Quaterniond(m);
+    }
+
+    inline cv::Vec3d quatToRvec(const Eigen::Quaterniond& q) {
+        Eigen::AngleAxisd aa(q.normalized());
+        Eigen::Vector3d axis = aa.axis();
+        double angle = aa.angle();
+        return cv::Vec3d(axis.x() * angle, axis.y() * angle, axis.z() * angle);
+    }
+
+    inline cv::Vec3d quatToRpyDeg(const Eigen::Quaterniond& q) {
+        Eigen::Matrix3d m = q.normalized().toRotationMatrix();
+        const double roll = std::atan2(m(2, 1), m(2, 2));
+        const double pitch = std::asin(std::clamp(-m(2, 0), -1.0, 1.0));
+        const double yaw = std::atan2(m(1, 0), m(0, 0));
+        return cv::Vec3d(roll * 180.0 / M_PI,
+                         pitch * 180.0 / M_PI,
+                         yaw * 180.0 / M_PI);
+    }
+
+    inline std::pair<double, double> txTyFromTvec(const cv::Vec3d& tvec) {
+        const double z = std::max(1e-6, tvec[2]);
+        const double tx = std::atan2(tvec[0], z) * 180.0 / M_PI;
+        const double ty = std::atan2(-tvec[1], z) * 180.0 / M_PI;
+        return {tx, ty};
+    }
 } // namespace
 // --------------------------------------------------------------------------
 
@@ -469,6 +505,7 @@ std::vector<Detection> FrameProcessor::mergeDetectionsById(const std::vector<Det
 
 cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stats) {
     auto t0 = std::chrono::high_resolution_clock::now();
+    auto frameTimestamp = std::chrono::steady_clock::now();
 
     if (frame.empty()) {
         return cv::Mat();
@@ -638,8 +675,21 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
 
         TagData td;
         td.id = det.id;
-        td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta_percent;
-        td.tvec = tvec; td.rvec = rvec; td.reprojError = reprojErr;
+        td.tx_deg = tx_deg;
+        td.ty_deg = ty_deg;
+        td.ta_percent = ta_percent;
+        td.tvec = tvec;
+        td.rvec = rvec;
+        td.rawTvec = tvec;
+        td.rawRvec = rvec;
+        td.filteredTvec = tvec;
+        td.filteredRvec = rvec;
+        td.filteredRpyDeg = cv::Vec3d();
+        td.velocityMps = cv::Vec3d();
+        td.accelMps2 = cv::Vec3d();
+        td.latencyCompMs = 0.0;
+        td.predictedPoseOnly = false;
+        td.reprojError = reprojErr;
         td.poseAmbiguity = std::clamp(reprojErr / std::max(1e-3, config::POSE_AMBIGUITY_SCALE), 0.0, 1.0);
         td.decisionMargin = det.decision_margin;
         td.areaPx = area;
@@ -654,7 +704,6 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         const double distanceM = std::sqrt(tvec[0] * tvec[0] +
                                            tvec[1] * tvec[1] +
                                            tvec[2] * tvec[2]);
-        const double closingVelocity = updateDistanceHistory(det.id, distanceM);
         const double fx = cameraMatrix_.at<double>(0, 0);
         const double fy = cameraMatrix_.at<double>(1, 1);
         const double cx0 = cameraMatrix_.at<double>(0, 2);
@@ -678,20 +727,16 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         }
         stability *= (1.0 - td.poseAmbiguity);
         stability *= std::clamp(1.0 - glareRatio * config::GLARE_STABILITY_WEIGHT, 0.0, 1.0);
-        double timeToImpactMs = 0.0;
-        if (closingVelocity > 1e-3) {
-            timeToImpactMs = std::max(0.0, (distanceM / closingVelocity) * 1000.0);
-        }
         for (size_t i = 0; i < td.corners.size(); ++i) {
             if (i < corners.size()) td.corners[i] = corners[i];
             else td.corners[i] = cv::Point2f();
         }
         td.distanceM = distanceM;
-        td.closingVelocityMps = closingVelocity;
+        td.closingVelocityMps = 0.0;
         td.stabilityScore = stability;
         td.predictedTxDeg = predictedTx;
         td.predictedTyDeg = predictedTy;
-        td.timeToImpactMs = timeToImpactMs;
+        td.timeToImpactMs = 0.0;
         td.glareFraction = glareRatio;
         tagDataList.push_back(td);
             }
@@ -722,6 +767,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
                 lastCorners_.clear();
                 lkLastPts_.clear();
                 distanceHistory_.clear();
+                poseFilters_.clear();
                 sceneHasUnseen_ = false;
             }
         }
@@ -737,6 +783,9 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
 
     auto t1 = std::chrono::high_resolution_clock::now();
     const double procTimeMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    const double pipelineLatencyMs = procTimeMs + config::PIPELINE_EXTRA_LATENCY_MS;
+
+    applyPoseFilters(tagDataList, pipelineLatencyMs, visibleIds, frameTimestamp);
 
     // Publish
     if (publisher_ && !tagDataList.empty()) {
@@ -749,7 +798,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         VisionPayload payload;
         payload.timestamp = std::chrono::duration<double>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-        payload.pipelineLatencyMs = procTimeMs;
+        payload.pipelineLatencyMs = pipelineLatencyMs;
         payload.tags = tagDataList;
         payload.bestTarget = bestSummary;
         payload.bestTagIndex = bestIndex;
@@ -930,6 +979,7 @@ void FrameProcessor::purgeOldTrackers(const std::set<int>& visibleIds) {
         lastCorners_.erase(id);
         lkLastPts_.erase(id);
         distanceHistory_.erase(id);
+        dropPoseFilter(id);
     }
 }
 
@@ -945,6 +995,207 @@ double FrameProcessor::updateDistanceHistory(int id, double distanceM) {
     }
     distanceHistory_[id] = DistanceHistory{distanceM, velocity, now};
     return velocity;
+}
+
+void FrameProcessor::applyPoseFilters(std::vector<TagData>& tags,
+                                      double pipelineLatencyMs,
+                                      const std::set<int>& visibleIds,
+                                      std::chrono::steady_clock::time_point frameTime) {
+    const double latencySec = pipelineLatencyMs / 1000.0;
+    for (auto& tag : tags) {
+        auto filterOut = stepPoseFilter(tag.id, tag.rawTvec, tag.rawRvec,
+                                        latencySec, frameTime);
+        tag.filteredTvec = filterOut.filteredTranslation;
+        tag.filteredRvec = filterOut.filteredRvec;
+        tag.filteredRpyDeg = filterOut.filteredRpyDeg;
+        tag.tvec = filterOut.predictedTranslation;
+        tag.rvec = filterOut.filteredRvec;
+        tag.velocityMps = filterOut.velocity;
+        tag.accelMps2 = filterOut.acceleration;
+        tag.latencyCompMs = pipelineLatencyMs;
+        tag.predictedPoseOnly = filterOut.predictionOnly;
+        auto [txLead, tyLead] = txTyFromTvec(tag.tvec);
+        tag.tx_deg = txLead;
+        tag.ty_deg = tyLead;
+        tag.distanceM = std::sqrt(tag.tvec[0] * tag.tvec[0] +
+                                  tag.tvec[1] * tag.tvec[1] +
+                                  tag.tvec[2] * tag.tvec[2]);
+        tag.closingVelocityMps = updateDistanceHistory(tag.id, tag.distanceM);
+        if (tag.closingVelocityMps > 1e-3) {
+            tag.timeToImpactMs = std::max(0.0, (tag.distanceM / tag.closingVelocityMps) * 1000.0);
+        } else {
+            tag.timeToImpactMs = 0.0;
+        }
+        if (tag.predictedPoseOnly) {
+            tag.stabilityScore *= config::PREDICTED_STABILITY_PENALTY;
+        }
+    }
+
+    auto held = emitPredictedTags(visibleIds, latencySec,
+                                  pipelineLatencyMs, frameTime);
+    tags.insert(tags.end(), held.begin(), held.end());
+}
+
+FilterOutput FrameProcessor::stepPoseFilter(int id,
+                                            const std::optional<cv::Vec3d>& translation,
+                                            const std::optional<cv::Vec3d>& rvec,
+                                            double latencySec,
+                                            std::chrono::steady_clock::time_point timestamp) {
+    FilterOutput output;
+    auto& state = poseFilters_[id];
+    bool hadState = state.initialized;
+    double dt = 0.0;
+    if (state.initialized) {
+        if (state.lastUpdate.time_since_epoch().count() != 0) {
+            dt = std::chrono::duration<double>(timestamp - state.lastUpdate).count();
+            if (dt < 0.0) dt = 0.0;
+        }
+    }
+
+    cv::Vec3d predictedPos = state.position;
+    cv::Vec3d predictedVel = state.velocity;
+    cv::Vec3d predictedAcc = state.acceleration;
+
+    if (state.initialized && dt > 0.0) {
+        predictedPos = state.position + state.velocity * dt +
+                       state.acceleration * (0.5 * dt * dt);
+        predictedVel = state.velocity + state.acceleration * dt;
+    }
+
+    if (!state.initialized && translation) {
+        predictedPos = *translation;
+        predictedVel = cv::Vec3d(0.0, 0.0, 0.0);
+        predictedAcc = cv::Vec3d(0.0, 0.0, 0.0);
+        state.initialized = true;
+        state.lastMeasurement = timestamp;
+    }
+
+    state.position = predictedPos;
+    state.velocity = predictedVel;
+    state.acceleration = predictedAcc;
+    state.lastUpdate = timestamp;
+
+    bool measurementUsed = false;
+    if (translation && state.initialized) {
+        cv::Vec3d residual = *translation - predictedPos;
+        cv::Vec3d weighted = residual;
+        weighted[2] *= config::FILTER_DEPTH_WEIGHT;
+        const double residNorm = cv::norm(weighted);
+        const double impliedVel = (dt > 1e-3) ? cv::norm(residual) / dt : 0.0;
+        if (residNorm <= config::FILTER_OUTLIER_TRANSLATION_M &&
+            impliedVel <= config::FILTER_OUTLIER_VEL_MPS) {
+            const double denomDt = std::max(dt, 1e-3);
+            const double denomAcc = std::max(0.5 * dt * dt, 1e-3);
+            state.position = predictedPos + config::FILTER_ALPHA * residual;
+            state.velocity = predictedVel + (config::FILTER_BETA * residual) / denomDt;
+            state.acceleration = predictedAcc + (config::FILTER_GAMMA * residual) / denomAcc;
+            state.lastMeasurement = timestamp;
+            measurementUsed = true;
+        }
+    }
+
+    if (translation && !hadState && state.initialized) {
+        measurementUsed = true;
+    }
+
+    if (measurementUsed && rvec) {
+        Eigen::Quaterniond measQuat = rvecToQuat(*rvec);
+        if (!state.orientationInitialized) {
+            state.orientation = measQuat;
+            state.orientationInitialized = true;
+        } else {
+            Eigen::Quaterniond delta = state.orientation.conjugate() * measQuat;
+            double angleDeg = std::abs(Eigen::AngleAxisd(delta).angle()) * 180.0 / M_PI;
+            if (angleDeg <= config::FILTER_ORIENTATION_OUTLIER_DEG) {
+                state.orientation = state.orientation.slerp(
+                    config::FILTER_ORIENTATION_ALPHA, measQuat);
+            }
+        }
+    } else if (translation && rvec && !state.orientationInitialized) {
+        state.orientation = rvecToQuat(*rvec);
+        state.orientationInitialized = true;
+    }
+
+    output.filteredTranslation = state.position;
+    output.velocity = state.velocity;
+    output.acceleration = state.acceleration;
+    const double lead = std::max(0.0, latencySec);
+    output.predictedTranslation = state.position + state.velocity * lead +
+                                  state.acceleration * (0.5 * lead * lead);
+    Eigen::Quaterniond orientation = state.orientationInitialized ?
+        state.orientation : Eigen::Quaterniond::Identity();
+    output.filteredRvec = quatToRvec(orientation);
+    output.filteredRpyDeg = quatToRpyDeg(orientation);
+    output.usedMeasurement = measurementUsed;
+    output.predictionOnly = !measurementUsed;
+    return output;
+}
+
+std::vector<TagData> FrameProcessor::emitPredictedTags(
+    const std::set<int>& visibleIds,
+    double latencySec,
+    double pipelineLatencyMs,
+    std::chrono::steady_clock::time_point frameTime) {
+    std::vector<TagData> predicted;
+    for (auto& [id, state] : poseFilters_) {
+        if (!state.initialized) continue;
+        if (visibleIds.find(id) != visibleIds.end()) continue;
+        if (state.lastMeasurement.time_since_epoch().count() == 0) continue;
+        const double unseenMs = std::chrono::duration<double, std::milli>(
+            frameTime - state.lastMeasurement).count();
+        if (unseenMs > config::FILTER_PREDICT_HOLD_MS) continue;
+
+        auto out = stepPoseFilter(id, std::nullopt, std::nullopt,
+                                  latencySec, frameTime);
+        TagData td{};
+        td.id = id;
+        td.ta_percent = 0.0;
+        td.areaPx = 0.0;
+        td.shortSidePx = 0.0;
+        td.longSidePx = 0.0;
+        td.boundingWidthPx = 0.0;
+        td.boundingHeightPx = 0.0;
+        td.skewDeg = 0.0;
+        td.reprojError = 0.0;
+        td.poseAmbiguity = 1.0;
+        td.decisionMargin = 0.0;
+        td.glareFraction = 0.0;
+        td.predictedPoseOnly = true;
+        td.latencyCompMs = pipelineLatencyMs;
+        td.tvec = out.predictedTranslation;
+        td.filteredTvec = out.filteredTranslation;
+        td.rawTvec = out.filteredTranslation;
+        td.rvec = out.filteredRvec;
+        td.filteredRvec = out.filteredRvec;
+        td.rawRvec = out.filteredRvec;
+        td.filteredRpyDeg = out.filteredRpyDeg;
+        td.velocityMps = out.velocity;
+        td.accelMps2 = out.acceleration;
+        auto [txLead, tyLead] = txTyFromTvec(td.tvec);
+        td.tx_deg = txLead;
+        td.ty_deg = tyLead;
+        td.predictedTxDeg = txLead;
+        td.predictedTyDeg = tyLead;
+        td.distanceM = std::sqrt(td.tvec[0] * td.tvec[0] +
+                                  td.tvec[1] * td.tvec[1] +
+                                  td.tvec[2] * td.tvec[2]);
+        td.closingVelocityMps = updateDistanceHistory(id, td.distanceM);
+        if (td.closingVelocityMps > 1e-3) {
+            td.timeToImpactMs = std::max(0.0, (td.distanceM / td.closingVelocityMps) * 1000.0);
+        } else {
+            td.timeToImpactMs = 0.0;
+        }
+        td.stabilityScore = config::PREDICTED_STABILITY_PENALTY;
+        for (auto& corner : td.corners) {
+            corner = cv::Point2f();
+        }
+        predicted.push_back(td);
+    }
+    return predicted;
+}
+
+void FrameProcessor::dropPoseFilter(int id) {
+    poseFilters_.erase(id);
 }
 
 std::optional<TargetSummary> FrameProcessor::selectBestTarget(const std::vector<TagData>& tags,
@@ -984,6 +1235,8 @@ std::optional<TargetSummary> FrameProcessor::selectBestTarget(const std::vector<
             summary.tvec = tag.tvec;
             summary.rvec = tag.rvec;
             summary.corners = tag.corners;
+            summary.predictedPoseOnly = tag.predictedPoseOnly;
+            summary.latencyCompMs = tag.latencyCompMs;
         }
     }
 

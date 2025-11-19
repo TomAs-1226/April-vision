@@ -245,18 +245,30 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
     std::vector<double> tyVals;
     std::vector<double> taVals;
     std::vector<double> xyz;
+    std::vector<double> xyzFiltered;
+    std::vector<double> xyzRaw;
     std::vector<double> rpy;
+    std::vector<double> rpyRaw;
     std::vector<double> distances;
     std::vector<double> ambiguities;
+    std::vector<double> velocities;
+    std::vector<double> predictedFlags;
+    std::vector<double> latencies;
 
     ids.reserve(payload.tags.size());
     txVals.reserve(payload.tags.size());
     tyVals.reserve(payload.tags.size());
     taVals.reserve(payload.tags.size());
     xyz.reserve(payload.tags.size() * 3);
+    xyzFiltered.reserve(payload.tags.size() * 3);
+    xyzRaw.reserve(payload.tags.size() * 3);
     rpy.reserve(payload.tags.size() * 3);
+    rpyRaw.reserve(payload.tags.size() * 3);
     distances.reserve(payload.tags.size());
     ambiguities.reserve(payload.tags.size());
+    velocities.reserve(payload.tags.size() * 3);
+    predictedFlags.reserve(payload.tags.size());
+    latencies.reserve(payload.tags.size());
 
     const TagData* best = nullptr;
     double bestDist = std::numeric_limits<double>::max();
@@ -266,7 +278,7 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
         bestDist = std::sqrt(best->tvec.dot(best->tvec));
     }
 
-    auto pushEuler = [&](const cv::Vec3d& rvec) {
+    auto pushEuler = [&](const cv::Vec3d& rvec, std::vector<double>& out) {
         cv::Matx33d R;
         cv::Mat Rmat;
         cv::Rodrigues(rvec, Rmat);
@@ -285,9 +297,9 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
             yaw = std::atan2(R(1, 0), R(0, 0));
             roll = std::atan2(R(2, 1), R(2, 2));
         }
-        rpy.push_back(roll * 180.0 / M_PI);
-        rpy.push_back(pitch * 180.0 / M_PI);
-        rpy.push_back(yaw * 180.0 / M_PI);
+        out.push_back(roll * 180.0 / M_PI);
+        out.push_back(pitch * 180.0 / M_PI);
+        out.push_back(yaw * 180.0 / M_PI);
     };
 
     for (const auto& tag : payload.tags) {
@@ -298,8 +310,20 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
         xyz.push_back(tag.tvec[0]);
         xyz.push_back(tag.tvec[1]);
         xyz.push_back(tag.tvec[2]);
-        pushEuler(tag.rvec);
+        xyzFiltered.push_back(tag.filteredTvec[0]);
+        xyzFiltered.push_back(tag.filteredTvec[1]);
+        xyzFiltered.push_back(tag.filteredTvec[2]);
+        xyzRaw.push_back(tag.rawTvec[0]);
+        xyzRaw.push_back(tag.rawTvec[1]);
+        xyzRaw.push_back(tag.rawTvec[2]);
+        pushEuler(tag.rvec, rpy);
+        pushEuler(tag.rawRvec, rpyRaw);
         ambiguities.push_back(tag.poseAmbiguity);
+        velocities.push_back(tag.velocityMps[0]);
+        velocities.push_back(tag.velocityMps[1]);
+        velocities.push_back(tag.velocityMps[2]);
+        predictedFlags.push_back(tag.predictedPoseOnly ? 1.0 : 0.0);
+        latencies.push_back(tag.latencyCompMs);
 
         const double dist = std::sqrt(tag.tvec[0] * tag.tvec[0] +
                                       tag.tvec[1] * tag.tvec[1] +
@@ -316,14 +340,21 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
     tyEntry_.SetDoubleArray(tyVals);
     taEntry_.SetDoubleArray(taVals);
     xyzEntry_.SetDoubleArray(xyz);
+    xyzFilteredEntry_.SetDoubleArray(xyzFiltered);
+    xyzRawEntry_.SetDoubleArray(xyzRaw);
     rpyEntry_.SetDoubleArray(rpy);
+    rpyRawEntry_.SetDoubleArray(rpyRaw);
     distanceEntry_.SetDoubleArray(distances);
     ambiguityEntry_.SetDoubleArray(ambiguities);
+    velocityEntry_.SetDoubleArray(velocities);
+    predictedEntry_.SetDoubleArray(predictedFlags);
+    poseLatencyEntry_.SetDoubleArray(latencies);
 
     if (best) {
         bestIdEntry_.SetDouble(static_cast<double>(best->id));
         bestDistanceEntry_.SetDouble(bestDist);
         bestPoseEntry_.SetDoubleArray({best->tvec[0], best->tvec[1], best->tvec[2]});
+        bestRawPoseEntry_.SetDoubleArray({best->rawTvec[0], best->rawTvec[1], best->rawTvec[2]});
 
         cv::Mat Rmat;
         cv::Rodrigues(best->rvec, Rmat);
@@ -340,16 +371,21 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
         bestClosingVelEntry_.SetDouble(payload.bestTarget ? payload.bestTarget->closingVelocityMps : best->closingVelocityMps);
         bestTimeToImpactEntry_.SetDouble(payload.bestTarget ? payload.bestTarget->timeToImpactMs : 0.0);
         bestStabilityEntry_.SetDouble(payload.bestTarget ? payload.bestTarget->stability : best->stabilityScore);
+        bestLatencyEntry_.SetDouble(payload.bestTarget ? payload.bestTarget->latencyCompMs : best->latencyCompMs);
+        bestPredictedEntry_.SetBoolean(payload.bestTarget ? payload.bestTarget->predictedPoseOnly : best->predictedPoseOnly);
     } else {
         bestIdEntry_.SetDouble(-1.0);
         bestDistanceEntry_.SetDouble(0.0);
         bestPoseEntry_.SetDoubleArray({});
+        bestRawPoseEntry_.SetDoubleArray({});
         bestRpyEntry_.SetDoubleArray({});
         bestTxPredEntry_.SetDouble(0.0);
         bestTyPredEntry_.SetDouble(0.0);
         bestClosingVelEntry_.SetDouble(0.0);
         bestTimeToImpactEntry_.SetDouble(0.0);
         bestStabilityEntry_.SetDouble(0.0);
+        bestLatencyEntry_.SetDouble(0.0);
+        bestPredictedEntry_.SetBoolean(false);
     }
 
     connectedEntry_.SetBoolean(ntInstance_.IsConnected());
@@ -483,7 +519,16 @@ void NetworkPublisher::publishLoop() {
                 json << "\"ty\":" << tag.ty_deg << ",";
                 json << "\"ta\":" << tag.ta_percent << ",";
                 json << "\"tvec\":[" << tag.tvec[0] << "," << tag.tvec[1] << "," << tag.tvec[2] << "],";
+                json << "\"filtered_tvec\":[" << tag.filteredTvec[0] << "," << tag.filteredTvec[1] << "," << tag.filteredTvec[2] << "],";
+                json << "\"raw_tvec\":[" << tag.rawTvec[0] << "," << tag.rawTvec[1] << "," << tag.rawTvec[2] << "],";
                 json << "\"rvec\":[" << tag.rvec[0] << "," << tag.rvec[1] << "," << tag.rvec[2] << "],";
+                json << "\"filtered_rvec\":[" << tag.filteredRvec[0] << "," << tag.filteredRvec[1] << "," << tag.filteredRvec[2] << "],";
+                json << "\"raw_rvec\":[" << tag.rawRvec[0] << "," << tag.rawRvec[1] << "," << tag.rawRvec[2] << "],";
+                json << "\"filtered_rpy_deg\":[" << tag.filteredRpyDeg[0] << "," << tag.filteredRpyDeg[1] << "," << tag.filteredRpyDeg[2] << "],";
+                json << "\"velocity_mps\":[" << tag.velocityMps[0] << "," << tag.velocityMps[1] << "," << tag.velocityMps[2] << "],";
+                json << "\"accel_mps2\":[" << tag.accelMps2[0] << "," << tag.accelMps2[1] << "," << tag.accelMps2[2] << "],";
+                json << "\"predicted_pose_only\":" << (tag.predictedPoseOnly ? 1 : 0) << ",";
+                json << "\"latency_ms\":" << tag.latencyCompMs << ",";
                 json << "\"reproj_err\":" << tag.reprojError << ",";
                 json << "\"ts\":" << tag.skewDeg << ",";
                 json << "\"tshort\":" << tag.shortSidePx << ",";
@@ -518,6 +563,8 @@ void NetworkPublisher::publishLoop() {
                 json << "\"ta\":" << payload.bestTarget->ta_percent << ",";
                 json << "\"distance_m\":" << payload.bestTarget->distanceM << ",";
                 json << "\"stability\":" << payload.bestTarget->stability << ",";
+                json << "\"predicted_pose_only\":" << (payload.bestTarget->predictedPoseOnly ? 1 : 0) << ",";
+                json << "\"latency_ms\":" << payload.bestTarget->latencyCompMs << ",";
                 json << "\"predicted\":{";
                 json << "\"tx\":" << payload.bestTarget->predictedTxDeg << ",";
                 json << "\"ty\":" << payload.bestTarget->predictedTyDeg << "},";
@@ -582,12 +629,21 @@ void NetworkPublisher::configureNetworkTables() {
     tyEntry_ = visionTable_->GetEntry("ty");
     taEntry_ = visionTable_->GetEntry("ta");
     xyzEntry_ = visionTable_->GetEntry("pose_xyz");
+    xyzFilteredEntry_ = visionTable_->GetEntry("pose_xyz_filtered");
+    xyzRawEntry_ = visionTable_->GetEntry("pose_xyz_raw");
     rpyEntry_ = visionTable_->GetEntry("pose_rpy_deg");
+    rpyRawEntry_ = visionTable_->GetEntry("pose_rpy_deg_raw");
+    velocityEntry_ = visionTable_->GetEntry("pose_velocity_mps");
+    predictedEntry_ = visionTable_->GetEntry("pose_predicted");
+    poseLatencyEntry_ = visionTable_->GetEntry("pose_latency_ms");
     distanceEntry_ = visionTable_->GetEntry("distance_m");
     bestIdEntry_ = visionTable_->GetEntry("best/id");
     bestPoseEntry_ = visionTable_->GetEntry("best/xyz");
+    bestRawPoseEntry_ = visionTable_->GetEntry("best/raw_xyz");
     bestRpyEntry_ = visionTable_->GetEntry("best/rpy_deg");
     bestDistanceEntry_ = visionTable_->GetEntry("best/distance_m");
+    bestLatencyEntry_ = visionTable_->GetEntry("best/latency_ms");
+    bestPredictedEntry_ = visionTable_->GetEntry("best/predicted_only");
     connectedEntry_ = visionTable_->GetEntry("connected");
     ambiguityEntry_ = visionTable_->GetEntry("pose_ambiguity");
     bestTxPredEntry_ = visionTable_->GetEntry("best/tx_pred_deg");

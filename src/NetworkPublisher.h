@@ -35,6 +35,13 @@ struct TagData {
     double ta_percent;
     cv::Vec3d tvec;
     cv::Vec3d rvec;
+    cv::Vec3d rawTvec;
+    cv::Vec3d rawRvec;
+    cv::Vec3d filteredTvec;
+    cv::Vec3d filteredRvec;
+    cv::Vec3d filteredRpyDeg;
+    cv::Vec3d velocityMps;
+    cv::Vec3d accelMps2;
     double reprojError;
     std::array<cv::Point2f, 4> corners;
     double skewDeg;
@@ -52,6 +59,8 @@ struct TagData {
     double predictedTyDeg;
     double timeToImpactMs;
     double glareFraction = 0.0;
+    double latencyCompMs = 0.0;
+    bool predictedPoseOnly = false;
 };
 
 struct TargetSummary {
@@ -68,6 +77,8 @@ struct TargetSummary {
     cv::Vec3d tvec;
     cv::Vec3d rvec;
     std::array<cv::Point2f, 4> corners;
+    bool predictedPoseOnly = false;
+    double latencyCompMs = 0.0;
 };
 
 struct MultiTagSolution {
@@ -147,12 +158,21 @@ private:
     nt::NetworkTableEntry tyEntry_;
     nt::NetworkTableEntry taEntry_;
     nt::NetworkTableEntry xyzEntry_;
+    nt::NetworkTableEntry xyzFilteredEntry_;
+    nt::NetworkTableEntry xyzRawEntry_;
     nt::NetworkTableEntry rpyEntry_;
+    nt::NetworkTableEntry rpyRawEntry_;
+    nt::NetworkTableEntry velocityEntry_;
+    nt::NetworkTableEntry predictedEntry_;
+    nt::NetworkTableEntry poseLatencyEntry_;
     nt::NetworkTableEntry distanceEntry_;
     nt::NetworkTableEntry bestIdEntry_;
     nt::NetworkTableEntry bestPoseEntry_;
+    nt::NetworkTableEntry bestRawPoseEntry_;
     nt::NetworkTableEntry bestRpyEntry_;
     nt::NetworkTableEntry bestDistanceEntry_;
+    nt::NetworkTableEntry bestLatencyEntry_;
+    nt::NetworkTableEntry bestPredictedEntry_;
     nt::NetworkTableEntry connectedEntry_;
     nt::NetworkTableEntry ambiguityEntry_;
     nt::NetworkTableEntry bestTxPredEntry_;
