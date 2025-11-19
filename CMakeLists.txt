@@ -90,6 +90,12 @@ if(NOT APRILTAG_INCLUDE_DIR OR NOT APRILTAG_LIB)
     set(BUILD_EXAMPLES OFF CACHE BOOL "Disable AprilTag demo executables" FORCE)
     set(BUILD_TESTING OFF CACHE BOOL "Disable AprilTag tests" FORCE)
     set(BUILD_PYTHON_WRAPPER OFF CACHE BOOL "Skip AprilTag python bindings" FORCE)
+    # Some toolchains cache AprilTag-specific options instead of the generic
+    # BUILD_* knobs.  Force those off as well so dependency builds remain
+    # headless across regenerations.
+    set(APRILTAG_BUILD_EXAMPLES OFF CACHE BOOL "Disable AprilTag demo executables" FORCE)
+    set(APRILTAG_BUILD_TESTS OFF CACHE BOOL "Disable AprilTag tests" FORCE)
+    set(APRILTAG_BUILD_PYTHON_WRAPPER OFF CACHE BOOL "Skip AprilTag python bindings" FORCE)
     FetchContent_Declare(
             apriltag
             GIT_REPOSITORY https://github.com/AprilRobotics/apriltag.git
@@ -115,6 +121,15 @@ set(SOURCES
 
 # Create executable
 add_executable(${PROJECT_NAME} ${SOURCES})
+
+# Visual Studio/CLion sometimes default to the first executable target.  Make
+# sure our camera app is always the startup target and provide an "apriltag_demo"
+# alias so existing IDE configurations continue to resolve to the correct
+# binary instead of the dependency's sample executable.
+set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT ${PROJECT_NAME})
+if(NOT TARGET apriltag_demo)
+    add_executable(apriltag_demo ALIAS ${PROJECT_NAME})
+endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
         ${OpenCV_INCLUDE_DIRS}
