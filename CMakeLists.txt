@@ -65,6 +65,7 @@ set(SOURCES
         src/NetworkPublisher.cpp
         src/FrameProcessor.cpp
         src/ArucoPoseHelper.cpp
+        src/FieldLayout.cpp
 )
 
 # Create executable

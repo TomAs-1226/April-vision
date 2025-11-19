@@ -75,6 +75,22 @@ std::vector<double> poseVector(const cv::Vec3d& t, const cv::Matx33d& R) {
     const auto euler = matrixToEulerDeg(R);
     return {t[0], t[1], t[2], euler[0], euler[1], euler[2]};
 }
+
+std::pair<cv::Vec3d, cv::Matx33d> mirrorBlueToRed(const cv::Vec3d& posBlue,
+                                                  const cv::Matx33d& rotBlue) {
+    cv::Vec3d posRed(
+        config::FIELD_LENGTH_METERS - posBlue[0],
+        config::FIELD_WIDTH_METERS - posBlue[1],
+        posBlue[2]
+    );
+    static const cv::Matx33d flip(
+        -1, 0, 0,
+         0,-1, 0,
+         0, 0, 1
+    );
+    cv::Matx33d rotRed = flip * rotBlue;
+    return {posRed, rotRed};
+}
 } // namespace
 
 NetworkPublisher::NetworkPublisher(const std::string& ntServer,
@@ -241,6 +257,11 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
 
     const TagData* best = nullptr;
     double bestDist = std::numeric_limits<double>::max();
+    if (payload.bestTagIndex >= 0 &&
+        payload.bestTagIndex < static_cast<int>(payload.tags.size())) {
+        best = &payload.tags[payload.bestTagIndex];
+        bestDist = std::sqrt(best->tvec.dot(best->tvec));
+    }
 
     auto pushEuler = [&](const cv::Vec3d& rvec) {
         cv::Matx33d R;
@@ -281,7 +302,7 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
                                       tag.tvec[1] * tag.tvec[1] +
                                       tag.tvec[2] * tag.tvec[2]);
         distances.push_back(dist);
-        if (dist < bestDist) {
+        if (!best && dist < bestDist) {
             bestDist = dist;
             best = &tag;
         }
@@ -311,14 +332,32 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
             pitch * 180.0 / M_PI,
             yaw * 180.0 / M_PI
         });
+        bestTxPredEntry_.SetDouble(payload.bestTarget ? payload.bestTarget->predictedTxDeg : best->tx_deg);
+        bestTyPredEntry_.SetDouble(payload.bestTarget ? payload.bestTarget->predictedTyDeg : best->ty_deg);
+        bestClosingVelEntry_.SetDouble(payload.bestTarget ? payload.bestTarget->closingVelocityMps : best->closingVelocityMps);
+        bestTimeToImpactEntry_.SetDouble(payload.bestTarget ? payload.bestTarget->timeToImpactMs : 0.0);
+        bestStabilityEntry_.SetDouble(payload.bestTarget ? payload.bestTarget->stability : best->stabilityScore);
     } else {
         bestIdEntry_.SetDouble(-1.0);
         bestDistanceEntry_.SetDouble(0.0);
         bestPoseEntry_.SetDoubleArray({});
         bestRpyEntry_.SetDoubleArray({});
+        bestTxPredEntry_.SetDouble(0.0);
+        bestTyPredEntry_.SetDouble(0.0);
+        bestClosingVelEntry_.SetDouble(0.0);
+        bestTimeToImpactEntry_.SetDouble(0.0);
+        bestStabilityEntry_.SetDouble(0.0);
     }
 
     connectedEntry_.SetBoolean(ntInstance_.IsConnected());
+
+    if (payload.multiTag && payload.multiTag->valid) {
+        multiTagCountEntry_.SetDouble(payload.multiTag->tagCount);
+        multiTagAmbEntry_.SetDouble(payload.multiTag->avgAmbiguity);
+    } else {
+        multiTagCountEntry_.SetDouble(0.0);
+        multiTagAmbEntry_.SetDouble(1.0);
+    }
 
     if (limelightTable_) {
         llCameraPoseRobotEntry_.SetDoubleArray(poseVector(camToRobotT_, camToRobotR_));
@@ -332,6 +371,14 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
             llThorEntry_.SetDouble(best->boundingWidthPx);
             llTvertEntry_.SetDouble(best->boundingHeightPx);
             llPoseAmbEntry_.SetDouble(best->poseAmbiguity);
+            std::vector<double> tcx, tcy;
+            for (const auto& corner : best->corners) {
+                tcx.push_back(corner.x);
+                tcy.push_back(corner.y);
+            }
+            llTcornXEntry_.SetDoubleArray(tcx);
+            llTcornYEntry_.SetDoubleArray(tcy);
+            llBestStabilityEntry_.SetDouble(payload.bestTarget ? payload.bestTarget->stability : best->stabilityScore);
 
             cv::Mat Rmat;
             cv::Rodrigues(best->rvec, Rmat);
@@ -362,6 +409,25 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
             llTargetPoseRobotEntry_.SetDoubleArray({});
             llCameraPoseTargetEntry_.SetDoubleArray({});
             llBotPoseTargetEntry_.SetDoubleArray({});
+            llTcornXEntry_.SetDoubleArray({});
+            llTcornYEntry_.SetDoubleArray({});
+            llBestStabilityEntry_.SetDouble(0.0);
+        }
+
+        if (payload.multiTag && payload.multiTag->valid) {
+            llBotPoseBlueEntry_.SetDoubleArray(poseVector(payload.multiTag->robotPoseField,
+                                                         payload.multiTag->robotRotField));
+            llCameraPoseFieldEntry_.SetDoubleArray(poseVector(payload.multiTag->cameraPoseField,
+                                                             payload.multiTag->cameraRotField));
+            auto redPose = mirrorBlueToRed(payload.multiTag->robotPoseField,
+                                           payload.multiTag->robotRotField);
+            llBotPoseRedEntry_.SetDoubleArray(poseVector(redPose.first, redPose.second));
+            llBotPoseRobotEntry_.SetDoubleArray({0.0, 0.0, 0.0, 0.0, 0.0, 0.0});
+        } else {
+            llBotPoseBlueEntry_.SetDoubleArray({});
+            llBotPoseRedEntry_.SetDoubleArray({});
+            llCameraPoseFieldEntry_.SetDoubleArray({});
+            llBotPoseRobotEntry_.SetDoubleArray({});
         }
     }
 #else
@@ -417,10 +483,58 @@ void NetworkPublisher::publishLoop() {
                 json << "\"tvert\":" << tag.boundingHeightPx << ",";
                 json << "\"ambiguity\":" << tag.poseAmbiguity << ",";
                 json << "\"decision_margin\":" << tag.decisionMargin << ",";
-                json << "\"area_px\":" << tag.areaPx;
+                json << "\"area_px\":" << tag.areaPx << ",";
+                json << "\"distance_m\":" << tag.distanceM << ",";
+                json << "\"closing_mps\":" << tag.closingVelocityMps << ",";
+                json << "\"stability\":" << tag.stabilityScore << ",";
+                json << "\"predicted\":{";
+                json << "\"tx\":" << tag.predictedTxDeg << ",";
+                json << "\"ty\":" << tag.predictedTyDeg << ",";
+                json << "\"time_ms\":" << tag.timeToImpactMs << "},";
+                json << "\"corners\":[";
+                for (size_t c = 0; c < tag.corners.size(); ++c) {
+                    if (c > 0) json << ",";
+                    json << "[" << tag.corners[c].x << "," << tag.corners[c].y << "]";
+                }
+                json << "]";
                 json << "}";
             }
             json << "]";
+            if (payload.bestTarget) {
+                json << ",\"best\":{";
+                json << "\"id\":" << payload.bestTarget->id << ",";
+                json << "\"tx\":" << payload.bestTarget->tx_deg << ",";
+                json << "\"ty\":" << payload.bestTarget->ty_deg << ",";
+                json << "\"ta\":" << payload.bestTarget->ta_percent << ",";
+                json << "\"distance_m\":" << payload.bestTarget->distanceM << ",";
+                json << "\"stability\":" << payload.bestTarget->stability << ",";
+                json << "\"predicted\":{";
+                json << "\"tx\":" << payload.bestTarget->predictedTxDeg << ",";
+                json << "\"ty\":" << payload.bestTarget->predictedTyDeg << "},";
+                json << "\"closing_mps\":" << payload.bestTarget->closingVelocityMps << ",";
+                json << "\"time_to_impact_ms\":" << payload.bestTarget->timeToImpactMs;
+                json << "}";
+            }
+            if (payload.multiTag && payload.multiTag->valid) {
+                json << ",\"multitag\":{";
+                json << "\"count\":" << payload.multiTag->tagCount << ",";
+                json << "\"avg_ambiguity\":" << payload.multiTag->avgAmbiguity << ",";
+                auto botBlue = poseVector(payload.multiTag->robotPoseField, payload.multiTag->robotRotField);
+                json << "\"botpose_wpiblue\":[";
+                for (size_t b = 0; b < botBlue.size(); ++b) {
+                    if (b > 0) json << ",";
+                    json << botBlue[b];
+                }
+                json << "],";
+                auto camField = poseVector(payload.multiTag->cameraPoseField, payload.multiTag->cameraRotField);
+                json << "\"camerapose_fieldspace\":[";
+                for (size_t b = 0; b < camField.size(); ++b) {
+                    if (b > 0) json << ",";
+                    json << camField[b];
+                }
+                json << "]";
+                json << "}";
+            }
             json << "}";
 
             std::string jsonStr = json.str();
@@ -466,6 +580,13 @@ void NetworkPublisher::configureNetworkTables() {
     bestDistanceEntry_ = visionTable_->GetEntry("best/distance_m");
     connectedEntry_ = visionTable_->GetEntry("connected");
     ambiguityEntry_ = visionTable_->GetEntry("pose_ambiguity");
+    bestTxPredEntry_ = visionTable_->GetEntry("best/tx_pred_deg");
+    bestTyPredEntry_ = visionTable_->GetEntry("best/ty_pred_deg");
+    bestTimeToImpactEntry_ = visionTable_->GetEntry("best/time_to_impact_ms");
+    bestClosingVelEntry_ = visionTable_->GetEntry("best/closing_mps");
+    bestStabilityEntry_ = visionTable_->GetEntry("best/stability");
+    multiTagCountEntry_ = visionTable_->GetEntry("multitag/count");
+    multiTagAmbEntry_ = visionTable_->GetEntry("multitag/avg_ambiguity");
 
     if (limelightTable_) {
         llTvEntry_ = limelightTable_->GetEntry("tv");
@@ -482,6 +603,13 @@ void NetworkPublisher::configureNetworkTables() {
         llCameraPoseRobotEntry_ = limelightTable_->GetEntry("camerapose_robotspace");
         llCameraPoseTargetEntry_ = limelightTable_->GetEntry("camerapose_targetspace");
         llBotPoseTargetEntry_ = limelightTable_->GetEntry("botpose_targetspace");
+        llTcornXEntry_ = limelightTable_->GetEntry("tcornx");
+        llTcornYEntry_ = limelightTable_->GetEntry("tcorny");
+        llBotPoseBlueEntry_ = limelightTable_->GetEntry("botpose_wpiblue");
+        llBotPoseRedEntry_ = limelightTable_->GetEntry("botpose_wpired");
+        llBotPoseRobotEntry_ = limelightTable_->GetEntry("botpose_robotspace");
+        llCameraPoseFieldEntry_ = limelightTable_->GetEntry("camerapose_fieldspace");
+        llBestStabilityEntry_ = limelightTable_->GetEntry("target_stability");
     }
     ntConfigured_ = true;
     std::cout << "[NetworkPublisher] NetworkTables client started at "

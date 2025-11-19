@@ -7,6 +7,7 @@
 #include <mutex>
 #include <atomic>
 #include <deque>
+#include <optional>
 #include <opencv2/opencv.hpp>
 #include <array>
 
@@ -44,12 +45,47 @@ struct TagData {
     double areaPx;
     double poseAmbiguity;
     double decisionMargin;
+    double distanceM;
+    double closingVelocityMps;
+    double stabilityScore;
+    double predictedTxDeg;
+    double predictedTyDeg;
+    double timeToImpactMs;
+};
+
+struct TargetSummary {
+    int id = -1;
+    double tx_deg = 0.0;
+    double ty_deg = 0.0;
+    double ta_percent = 0.0;
+    double distanceM = 0.0;
+    double stability = 0.0;
+    double predictedTxDeg = 0.0;
+    double predictedTyDeg = 0.0;
+    double closingVelocityMps = 0.0;
+    double timeToImpactMs = 0.0;
+    cv::Vec3d tvec;
+    cv::Vec3d rvec;
+    std::array<cv::Point2f, 4> corners;
+};
+
+struct MultiTagSolution {
+    bool valid = false;
+    int tagCount = 0;
+    double avgAmbiguity = 1.0;
+    cv::Vec3d cameraPoseField;
+    cv::Matx33d cameraRotField;
+    cv::Vec3d robotPoseField;
+    cv::Matx33d robotRotField;
 };
 
 struct VisionPayload {
     double timestamp;
     double pipelineLatencyMs;
     std::vector<TagData> tags;
+    std::optional<TargetSummary> bestTarget;
+    int bestTagIndex = -1;
+    std::optional<MultiTagSolution> multiTag;
 };
 
 class NetworkPublisher {
@@ -115,6 +151,13 @@ private:
     nt::NetworkTableEntry bestDistanceEntry_;
     nt::NetworkTableEntry connectedEntry_;
     nt::NetworkTableEntry ambiguityEntry_;
+    nt::NetworkTableEntry bestTxPredEntry_;
+    nt::NetworkTableEntry bestTyPredEntry_;
+    nt::NetworkTableEntry bestTimeToImpactEntry_;
+    nt::NetworkTableEntry bestClosingVelEntry_;
+    nt::NetworkTableEntry bestStabilityEntry_;
+    nt::NetworkTableEntry multiTagCountEntry_;
+    nt::NetworkTableEntry multiTagAmbEntry_;
     nt::NetworkTableEntry llTvEntry_;
     nt::NetworkTableEntry llTidEntry_;
     nt::NetworkTableEntry llTsEntry_;
@@ -129,6 +172,13 @@ private:
     nt::NetworkTableEntry llCameraPoseRobotEntry_;
     nt::NetworkTableEntry llCameraPoseTargetEntry_;
     nt::NetworkTableEntry llBotPoseTargetEntry_;
+    nt::NetworkTableEntry llTcornXEntry_;
+    nt::NetworkTableEntry llTcornYEntry_;
+    nt::NetworkTableEntry llBotPoseBlueEntry_;
+    nt::NetworkTableEntry llBotPoseRedEntry_;
+    nt::NetworkTableEntry llBotPoseRobotEntry_;
+    nt::NetworkTableEntry llCameraPoseFieldEntry_;
+    nt::NetworkTableEntry llBestStabilityEntry_;
 #endif
 
 #ifdef USE_NTCORE

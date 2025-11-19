@@ -91,6 +91,17 @@ inline constexpr double POSE_AMBIGUITY_SCALE = 8.0;
 inline constexpr double PROCESS_TIME_HIGH_MS = 18.0;
 inline constexpr double PROCESS_TIME_LOW_MS = 8.0;
 
+// Auto align prediction
+inline constexpr double AUTOALIGN_LEAD_TIME_MS = 50.0;
+inline constexpr double TARGET_STABILITY_DECAY = 0.08;
+
+// Field layout / Limelight compatibility
+inline constexpr const char* FIELD_LAYOUT_PATH = "assets/2024-crescendo.json";
+inline constexpr double FIELD_LENGTH_METERS = 16.5418;
+inline constexpr double FIELD_WIDTH_METERS = 8.211;
+inline constexpr int MULTITAG_MIN_COUNT = 2;
+inline constexpr double MULTITAG_MAX_AMBIGUITY = 0.8;
+
 // CLAHE parameters
 inline constexpr double CLAHE_CLIP_LIMIT = 2.2;
 inline constexpr int CLAHE_TILE_SIZE = 8;

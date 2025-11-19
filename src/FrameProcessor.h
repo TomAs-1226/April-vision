@@ -5,6 +5,7 @@
 #include "ArucoPoseHelper.h"
 #include "Tracker.h"
 #include "NetworkPublisher.h"
+#include "FieldLayout.h"
 #include <opencv2/opencv.hpp>
 #include <memory>
 #include <map>
@@ -71,6 +72,10 @@ private:
                       const std::vector<cv::Point2f>& corners,
                       double tx, double ty, double ta, const cv::Vec3d& tvec);
     void drawPrediction(cv::Mat& vis, int id, double cx, double cy, double s, bool isOpticalFlow);
+    std::optional<TargetSummary> selectBestTarget(const std::vector<TagData>& tags,
+                                                 int width, int height, int& bestIndex);
+    std::optional<MultiTagSolution> solveFieldPose(const std::vector<TagData>& tags);
+    double updateDistanceHistory(int id, double distanceM);
 
     // Members
     std::unique_ptr<Detector> detector_;
@@ -106,6 +111,13 @@ private:
     cv::Mat prevGray_;
     std::map<int, std::vector<cv::Point2f>> lkLastPts_;
 
+    struct DistanceHistory {
+        double distance = 0.0;
+        double velocity = 0.0;
+        std::chrono::steady_clock::time_point timestamp;
+    };
+    std::unordered_map<int, DistanceHistory> distanceHistory_;
+
     // Scene management
     std::chrono::steady_clock::time_point sceneUnseenStart_;
     bool sceneHasUnseen_;
@@ -122,4 +134,12 @@ private:
     // Buffers (reused to avoid allocation)
     cv::Mat grayBuf_;
     cv::Mat preprocessBuf_;
+
+    // Field layout / extrinsics
+    std::unique_ptr<FieldLayout> fieldLayout_;
+    bool fieldLayoutReady_ = false;
+    cv::Matx33d camToRobotR_;
+    cv::Matx33d robotToCamR_;
+    cv::Vec3d camToRobotT_;
+    cv::Vec3d robotToCamT_;
 };
