@@ -29,6 +29,11 @@ inline constexpr int GUI_RATE_HZ = 20;
 inline constexpr int MIN_DET_RATE = 30;
 inline constexpr int MAX_DET_RATE = 180;
 inline constexpr int DETECTOR_THREADS = 0; // 0 => auto-detect
+inline constexpr double FAST_MODE_TRIGGER_MS = 9.0;
+inline constexpr int FAST_MODE_RECOVERY_FRAMES = 10;
+inline constexpr bool FAST_MODE_SKIP_REFINEMENT = true;
+inline constexpr bool FAST_MODE_SKIP_MULTITAG = true;
+inline constexpr double FAST_MODE_MIN_SUBPIX_DIAG = 22.0;
 
 // NetworkTables / UDP
 inline constexpr const char* NT_SERVER = "10.0.0.2";
@@ -97,6 +102,8 @@ inline constexpr double TARGET_STABILITY_DECAY = 0.08;
 
 // Field layout / Limelight compatibility
 inline constexpr const char* FIELD_LAYOUT_PATH = "assets/2024-crescendo.json";
+inline constexpr const char* FIELD_LAYOUT_REEFSCAPE_PATH = "assets/2025-reefscape-welded.json";
+inline constexpr bool FIELD_LAYOUT_INCLUDE_REEFSCAPE = true;
 inline constexpr double FIELD_LENGTH_METERS = 16.5418;
 inline constexpr double FIELD_WIDTH_METERS = 8.211;
 inline constexpr int MULTITAG_MIN_COUNT = 2;
@@ -118,5 +125,20 @@ inline constexpr double CAMERA_TO_ROBOT_Z = 0.64;
 inline constexpr double CAMERA_TO_ROBOT_ROLL_DEG = 0.0;
 inline constexpr double CAMERA_TO_ROBOT_PITCH_DEG = 0.0;
 inline constexpr double CAMERA_TO_ROBOT_YAW_DEG = 0.0;
+
+// Temporal denoise / glare suppression
+inline constexpr bool ENABLE_TEMPORAL_DENOISE = true;
+inline constexpr double TEMPORAL_DENOISE_ALPHA = 0.12;
+inline constexpr double TEMPORAL_DENOISE_MIX = 0.6;
+inline constexpr bool ENABLE_SPECULAR_SUPPRESSION = true;
+inline constexpr int SPECULAR_MEDIAN_SIZE = 9;
+inline constexpr double SPECULAR_THRESHOLD = 26.0;
+inline constexpr int SPECULAR_DILATE_ITER = 1;
+inline constexpr int SPECULAR_ERODE_ITER = 1;
+inline constexpr int SPECULAR_BILATERAL_DIAMETER = 9;
+inline constexpr double SPECULAR_BILATERAL_SIGMA = 45.0;
+inline constexpr double SPECULAR_SUPPRESS_GAIN = 0.65;
+inline constexpr double GLARE_STABILITY_WEIGHT = 0.55;
+inline constexpr double GLARE_SCORE_WEIGHT = 1.4;
 
 } // namespace config

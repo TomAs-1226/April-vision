@@ -5,8 +5,12 @@
 #include <iostream>
 #include <cmath>
 
-bool FieldLayout::loadFromJson(const std::string& path) {
-    poses_.clear();
+bool FieldLayout::loadFromJson(const std::string& path, bool clearExisting) {
+    if (clearExisting) {
+        poses_.clear();
+    }
+
+    const size_t before = poses_.size();
 
     cv::FileStorage fs(path, cv::FileStorage::READ | cv::FileStorage::FORMAT_JSON);
     if (!fs.isOpened()) {
@@ -46,7 +50,8 @@ bool FieldLayout::loadFromJson(const std::string& path) {
         poses_[pose.id] = pose;
     }
 
-    std::cout << "[FieldLayout] Loaded " << poses_.size()
+    const size_t loaded = poses_.size() - before;
+    std::cout << "[FieldLayout] Loaded " << loaded
               << " tag poses from " << path << std::endl;
     return !poses_.empty();
 }

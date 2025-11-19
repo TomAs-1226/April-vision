@@ -13,7 +13,8 @@ struct FieldTagPose {
 
 class FieldLayout {
 public:
-    bool loadFromJson(const std::string& path);
+    bool loadFromJson(const std::string& path, bool clearExisting = true);
+    bool appendFromJson(const std::string& path) { return loadFromJson(path, false); }
     std::optional<FieldTagPose> getTagPose(int id) const;
     bool empty() const { return poses_.empty(); }
 

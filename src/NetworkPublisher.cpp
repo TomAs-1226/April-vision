@@ -236,6 +236,9 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
 
     timestampEntry_.SetDouble(payload.timestamp);
     latencyEntry_.SetDouble(payload.pipelineLatencyMs);
+    fpsEntry_.SetDouble(payload.detectionRateHz);
+    fastModeEntry_.SetBoolean(payload.fastModeActive);
+    glareEntry_.SetBoolean(payload.glareSuppressed);
 
     std::vector<double> ids;
     std::vector<double> txVals;
@@ -414,6 +417,9 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
             llBestStabilityEntry_.SetDouble(0.0);
         }
 
+        llFpsEntry_.SetDouble(payload.detectionRateHz);
+        llFastModeEntry_.SetBoolean(payload.fastModeActive);
+
         if (payload.multiTag && payload.multiTag->valid) {
             llBotPoseBlueEntry_.SetDoubleArray(poseVector(payload.multiTag->robotPoseField,
                                                          payload.multiTag->robotRotField));
@@ -456,6 +462,9 @@ void NetworkPublisher::publishLoop() {
             json << "{";
             json << "\"timestamp\":" << payload.timestamp << ",";
             json << "\"pipeline_ms\":" << payload.pipelineLatencyMs << ",";
+            json << "\"fps\":" << payload.detectionRateHz << ",";
+            json << "\"fast_mode\":" << (payload.fastModeActive ? 1 : 0) << ",";
+            json << "\"glare_active\":" << (payload.glareSuppressed ? 1 : 0) << ",";
             json << "\"tag_count\":" << payload.tags.size() << ",";
             json << "\"tagIDs\":\"";
             for (size_t i = 0; i < payload.tags.size(); i++) {
@@ -487,6 +496,7 @@ void NetworkPublisher::publishLoop() {
                 json << "\"distance_m\":" << tag.distanceM << ",";
                 json << "\"closing_mps\":" << tag.closingVelocityMps << ",";
                 json << "\"stability\":" << tag.stabilityScore << ",";
+                json << "\"glare\":" << tag.glareFraction << ",";
                 json << "\"predicted\":{";
                 json << "\"tx\":" << tag.predictedTxDeg << ",";
                 json << "\"ty\":" << tag.predictedTyDeg << ",";
@@ -587,6 +597,9 @@ void NetworkPublisher::configureNetworkTables() {
     bestStabilityEntry_ = visionTable_->GetEntry("best/stability");
     multiTagCountEntry_ = visionTable_->GetEntry("multitag/count");
     multiTagAmbEntry_ = visionTable_->GetEntry("multitag/avg_ambiguity");
+    fpsEntry_ = visionTable_->GetEntry("fps");
+    fastModeEntry_ = visionTable_->GetEntry("fast_mode");
+    glareEntry_ = visionTable_->GetEntry("glare_suppressed");
 
     if (limelightTable_) {
         llTvEntry_ = limelightTable_->GetEntry("tv");
@@ -610,6 +623,8 @@ void NetworkPublisher::configureNetworkTables() {
         llBotPoseRobotEntry_ = limelightTable_->GetEntry("botpose_robotspace");
         llCameraPoseFieldEntry_ = limelightTable_->GetEntry("camerapose_fieldspace");
         llBestStabilityEntry_ = limelightTable_->GetEntry("target_stability");
+        llFpsEntry_ = limelightTable_->GetEntry("pipelinefps");
+        llFastModeEntry_ = limelightTable_->GetEntry("fast_mode");
     }
     ntConfigured_ = true;
     std::cout << "[NetworkPublisher] NetworkTables client started at "

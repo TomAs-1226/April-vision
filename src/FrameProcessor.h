@@ -53,6 +53,9 @@ private:
     double computeBlurVariance(const cv::Mat& gray);
     int chooseDecimate(int base, double blurVar);
     void buildGammaLUT(double gamma);
+    void applyTemporalDenoise(cv::Mat& img);
+    void applySpecularSuppression(cv::Mat& img);
+    double computeGlareFraction(const std::vector<cv::Point2f>& corners) const;
 
     // Detection filtering
     bool shouldProcessTag(int id);
@@ -76,6 +79,7 @@ private:
                                                  int width, int height, int& bestIndex);
     std::optional<MultiTagSolution> solveFieldPose(const std::vector<TagData>& tags);
     double updateDistanceHistory(int id, double distanceM);
+    void updateFastMode(double procTimeMs);
 
     // Members
     std::unique_ptr<Detector> detector_;
@@ -134,6 +138,9 @@ private:
     // Buffers (reused to avoid allocation)
     cv::Mat grayBuf_;
     cv::Mat preprocessBuf_;
+    cv::Mat temporalLowpass_;
+    cv::Mat glareMask_;
+    bool glareSuppressedThisFrame_ = false;
 
     // Field layout / extrinsics
     std::unique_ptr<FieldLayout> fieldLayout_;
@@ -142,4 +149,8 @@ private:
     cv::Matx33d robotToCamR_;
     cv::Vec3d camToRobotT_;
     cv::Vec3d robotToCamT_;
+
+    // Fast-path scheduling
+    int fastModeCounter_ = 0;
+    bool fastModeActive_ = false;
 };

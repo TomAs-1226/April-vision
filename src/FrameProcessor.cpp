@@ -171,6 +171,8 @@ FrameProcessor::FrameProcessor()
     , frameCounter_(0)
     , emaPosAlpha_(config::EMA_ALPHA_POS)
     , emaPoseAlpha_(config::EMA_ALPHA_POSE)
+    , fastModeCounter_(0)
+    , fastModeActive_(false)
 {
     detector_ = std::make_unique<Detector>();
     poseEstimator_ = std::make_unique<PoseEstimator>();
@@ -185,10 +187,18 @@ FrameProcessor::FrameProcessor()
     robotToCamT_ = -matMul(robotToCamR_, camToRobotT_);
 
     std::string layoutPath = config::FIELD_LAYOUT_PATH ? config::FIELD_LAYOUT_PATH : "";
+    fieldLayout_ = std::make_unique<FieldLayout>();
+    bool layoutLoaded = false;
     if (!layoutPath.empty()) {
-        fieldLayout_ = std::make_unique<FieldLayout>();
-        fieldLayoutReady_ = fieldLayout_->loadFromJson(layoutPath);
+        layoutLoaded |= fieldLayout_->loadFromJson(layoutPath);
     }
+    if (config::FIELD_LAYOUT_INCLUDE_REEFSCAPE && config::FIELD_LAYOUT_REEFSCAPE_PATH) {
+        std::string reef = config::FIELD_LAYOUT_REEFSCAPE_PATH;
+        if (!reef.empty() && reef != layoutPath) {
+            layoutLoaded |= fieldLayout_->appendFromJson(reef);
+        }
+    }
+    fieldLayoutReady_ = layoutLoaded;
 
     clahe_ = cv::createCLAHE(config::CLAHE_CLIP_LIMIT,
                              cv::Size(config::CLAHE_TILE_SIZE, config::CLAHE_TILE_SIZE));
@@ -229,6 +239,91 @@ void FrameProcessor::buildGammaLUT(double gamma) {
     }
 }
 
+void FrameProcessor::applyTemporalDenoise(cv::Mat& img) {
+    if (img.empty()) {
+        return;
+    }
+    cv::Mat floatImg;
+    img.convertTo(floatImg, CV_32F);
+    if (temporalLowpass_.empty() || temporalLowpass_.size() != img.size()) {
+        floatImg.copyTo(temporalLowpass_);
+    } else {
+        cv::accumulateWeighted(floatImg, temporalLowpass_, config::TEMPORAL_DENOISE_ALPHA);
+    }
+    cv::Mat blended;
+    temporalLowpass_.convertTo(blended, img.type());
+    cv::addWeighted(img, config::TEMPORAL_DENOISE_MIX,
+                    blended, 1.0 - config::TEMPORAL_DENOISE_MIX,
+                    0.0, img);
+}
+
+void FrameProcessor::applySpecularSuppression(cv::Mat& img) {
+    if (img.empty()) {
+        return;
+    }
+    const int medianSize = std::max(3, config::SPECULAR_MEDIAN_SIZE | 1);
+    cv::Mat median;
+    cv::medianBlur(img, median, medianSize);
+    cv::Mat diff;
+    cv::absdiff(img, median, diff);
+    if (glareMask_.empty() || glareMask_.size() != img.size()) {
+        glareMask_.create(img.size(), CV_8UC1);
+    }
+    cv::threshold(diff, glareMask_, config::SPECULAR_THRESHOLD, 255, cv::THRESH_BINARY);
+    if (config::SPECULAR_DILATE_ITER > 0) {
+        const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
+        cv::dilate(glareMask_, glareMask_, kernel, cv::Point(-1, -1), config::SPECULAR_DILATE_ITER);
+    }
+    if (config::SPECULAR_ERODE_ITER > 0) {
+        const cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(3, 3));
+        cv::erode(glareMask_, glareMask_, kernel, cv::Point(-1, -1), config::SPECULAR_ERODE_ITER);
+    }
+    glareSuppressedThisFrame_ = cv::countNonZero(glareMask_) > 0;
+    if (!glareSuppressedThisFrame_) {
+        glareMask_.setTo(0);
+        return;
+    }
+    const int diameter = std::max(3, config::SPECULAR_BILATERAL_DIAMETER | 1);
+    cv::Mat smooth;
+    cv::bilateralFilter(img, smooth, diameter,
+                        config::SPECULAR_BILATERAL_SIGMA,
+                        config::SPECULAR_BILATERAL_SIGMA);
+    cv::Mat blended;
+    cv::addWeighted(img, 1.0 - config::SPECULAR_SUPPRESS_GAIN,
+                    smooth, config::SPECULAR_SUPPRESS_GAIN,
+                    0.0, blended);
+    blended.copyTo(img, glareMask_);
+}
+
+double FrameProcessor::computeGlareFraction(const std::vector<cv::Point2f>& corners) const {
+    if (glareMask_.empty() || corners.empty()) {
+        return 0.0;
+    }
+    cv::Rect bounds = cv::boundingRect(corners);
+    bounds = clampRect(bounds, glareMask_.cols, glareMask_.rows);
+    if (bounds.width <= 0 || bounds.height <= 0) {
+        return 0.0;
+    }
+    const cv::Mat roi = glareMask_(bounds);
+    const int glarePx = cv::countNonZero(roi);
+    const double total = static_cast<double>(bounds.area());
+    if (total <= 0.0) {
+        return 0.0;
+    }
+    return std::clamp(glarePx / total, 0.0, 1.0);
+}
+
+void FrameProcessor::updateFastMode(double procTimeMs) {
+    const double targetMs = 1000.0 / std::max(30.0, detectionRate_);
+    const double trigger = std::max(config::FAST_MODE_TRIGGER_MS, targetMs * 1.05);
+    if (procTimeMs > trigger) {
+        fastModeCounter_ = config::FAST_MODE_RECOVERY_FRAMES;
+    } else if (fastModeCounter_ > 0) {
+        --fastModeCounter_;
+    }
+    fastModeActive_ = fastModeCounter_ > 0;
+}
+
 cv::Mat FrameProcessor::preprocessImage(const cv::Mat& gray) {
     if (preprocessBuf_.empty() || preprocessBuf_.size() != gray.size()) {
         preprocessBuf_.create(gray.size(), gray.type());
@@ -242,6 +337,17 @@ cv::Mat FrameProcessor::preprocessImage(const cv::Mat& gray) {
 
     if (std::abs(gamma_ - 1.0) > 1e-3) {
         cv::LUT(preprocessBuf_, gammaLUT_, preprocessBuf_);
+    }
+
+    if (config::ENABLE_TEMPORAL_DENOISE) {
+        applyTemporalDenoise(preprocessBuf_);
+    }
+
+    glareSuppressedThisFrame_ = false;
+    if (config::ENABLE_SPECULAR_SUPPRESSION) {
+        applySpecularSuppression(preprocessBuf_);
+    } else if (!glareMask_.empty()) {
+        glareMask_.setTo(0);
     }
 
     return preprocessBuf_;
@@ -370,6 +476,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
 
     const int h = frame.rows;
     const int w = frame.cols;
+    const bool fastMode = fastModeActive_;
 
     // Initialize camera matrix if needed
     if (cameraMatrix_.empty()) {
@@ -432,11 +539,17 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
             centroidX /= corners.size();
             centroidY /= corners.size();
         }
+        double diagPx = 0.0;
+        if (corners.size() >= 4) {
+            diagPx = cv::norm(corners[0] - corners[2]);
+        }
 
         // ---- Safe sub-pixel refinement on the SAME image/scale used for detection ----
         // Prevents: OpenCV(…) error: Rect(0,0,src.cols,src.rows).contains(cT) in cv::cornerSubPix
         // (points must be inside the image; we skip those too close to borders). :contentReference[oaicite:3]{index=3}
-        if (area > 30.0) {
+        const bool allowSubpix = !fastMode || !config::FAST_MODE_SKIP_REFINEMENT ||
+                                 diagPx >= config::FAST_MODE_MIN_SUBPIX_DIAG;
+        if (area > 30.0 && allowSubpix) {
             const cv::Size subWin(config::CORNER_SUBPIX_WIN, config::CORNER_SUBPIX_WIN);
             const int margin = std::max(subWin.width, subWin.height) / 2;
 
@@ -534,6 +647,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         td.shortSidePx = shortSide;
         td.longSidePx = longSide;
         const cv::Rect bounds = cv::boundingRect(corners);
+        const double glareRatio = computeGlareFraction(corners);
         td.boundingWidthPx = static_cast<double>(bounds.width);
         td.boundingHeightPx = static_cast<double>(bounds.height);
         td.skewDeg = computeSkewDeg(corners);
@@ -563,6 +677,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
             }
         }
         stability *= (1.0 - td.poseAmbiguity);
+        stability *= std::clamp(1.0 - glareRatio * config::GLARE_STABILITY_WEIGHT, 0.0, 1.0);
         double timeToImpactMs = 0.0;
         if (closingVelocity > 1e-3) {
             timeToImpactMs = std::max(0.0, (distanceM / closingVelocity) * 1000.0);
@@ -577,6 +692,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         td.predictedTxDeg = predictedTx;
         td.predictedTyDeg = predictedTy;
         td.timeToImpactMs = timeToImpactMs;
+        td.glareFraction = glareRatio;
         tagDataList.push_back(td);
             }
         }
@@ -626,7 +742,10 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
     if (publisher_ && !tagDataList.empty()) {
         int bestIndex = -1;
         auto bestSummary = selectBestTarget(tagDataList, w, h, bestIndex);
-        auto multiTagSolution = solveFieldPose(tagDataList);
+        std::optional<MultiTagSolution> multiTagSolution;
+        if (!(fastMode && config::FAST_MODE_SKIP_MULTITAG)) {
+            multiTagSolution = solveFieldPose(tagDataList);
+        }
         VisionPayload payload;
         payload.timestamp = std::chrono::duration<double>(
             std::chrono::system_clock::now().time_since_epoch()).count();
@@ -635,8 +754,13 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         payload.bestTarget = bestSummary;
         payload.bestTagIndex = bestIndex;
         payload.multiTag = multiTagSolution;
+        payload.detectionRateHz = detectionRate_;
+        payload.fastModeActive = fastMode;
+        payload.glareSuppressed = glareSuppressedThisFrame_;
         publisher_->publish(payload);
     }
+
+    updateFastMode(procTimeMs);
 
     // Stats
 
@@ -842,7 +966,8 @@ std::optional<TargetSummary> FrameProcessor::selectBestTarget(const std::vector<
         const double marginScore = tag.decisionMargin * 0.6;
         const double stabilityScore = tag.stabilityScore * 1.2;
         const double ambiguityPenalty = tag.poseAmbiguity * 0.8;
-        const double score = marginScore + areaScore + stabilityScore - centerPenalty - distancePenalty - ambiguityPenalty;
+        const double glarePenalty = tag.glareFraction * config::GLARE_SCORE_WEIGHT;
+        const double score = marginScore + areaScore + stabilityScore - centerPenalty - distancePenalty - ambiguityPenalty - glarePenalty;
         if (score > bestScore) {
             bestScore = score;
             bestIndex = static_cast<int>(i);

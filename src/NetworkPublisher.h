@@ -51,6 +51,7 @@ struct TagData {
     double predictedTxDeg;
     double predictedTyDeg;
     double timeToImpactMs;
+    double glareFraction = 0.0;
 };
 
 struct TargetSummary {
@@ -86,6 +87,9 @@ struct VisionPayload {
     std::optional<TargetSummary> bestTarget;
     int bestTagIndex = -1;
     std::optional<MultiTagSolution> multiTag;
+    double detectionRateHz = 0.0;
+    bool fastModeActive = false;
+    bool glareSuppressed = false;
 };
 
 class NetworkPublisher {
@@ -158,6 +162,9 @@ private:
     nt::NetworkTableEntry bestStabilityEntry_;
     nt::NetworkTableEntry multiTagCountEntry_;
     nt::NetworkTableEntry multiTagAmbEntry_;
+    nt::NetworkTableEntry fpsEntry_;
+    nt::NetworkTableEntry fastModeEntry_;
+    nt::NetworkTableEntry glareEntry_;
     nt::NetworkTableEntry llTvEntry_;
     nt::NetworkTableEntry llTidEntry_;
     nt::NetworkTableEntry llTsEntry_;
@@ -179,6 +186,8 @@ private:
     nt::NetworkTableEntry llBotPoseRobotEntry_;
     nt::NetworkTableEntry llCameraPoseFieldEntry_;
     nt::NetworkTableEntry llBestStabilityEntry_;
+    nt::NetworkTableEntry llFpsEntry_;
+    nt::NetworkTableEntry llFastModeEntry_;
 #endif
 
 #ifdef USE_NTCORE
