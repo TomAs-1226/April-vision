@@ -30,6 +30,7 @@ find_package(OpenCV REQUIRED)
 find_package(Eigen3 REQUIRED)
 
 set(APRILTAG_ROOT "" CACHE PATH "Root directory of an AprilTag installation (optional)")
+option(FORCE_BUNDLED_APRILTAG "Always build the bundled AprilTag dependency" OFF)
 
 set(_apriltag_include_hints)
 if(APRILTAG_ROOT)
@@ -37,17 +38,6 @@ if(APRILTAG_ROOT)
         "${APRILTAG_ROOT}"
         "${APRILTAG_ROOT}/include"
         "${APRILTAG_ROOT}/include/apriltag")
-endif()
-
-find_path(APRILTAG_INCLUDE_DIR
-    NAMES apriltag.h
-    HINTS ${_apriltag_include_hints}
-    PATHS /usr/include /usr/local/include /opt/homebrew/include
-    PATH_SUFFIXES apriltag
-)
-
-if(NOT APRILTAG_INCLUDE_DIR)
-    message(FATAL_ERROR "AprilTag headers not found. Set APRILTAG_ROOT or install apriltag.")
 endif()
 
 set(_apriltag_library_hints)
@@ -60,17 +50,38 @@ if(APRILTAG_ROOT)
         "${APRILTAG_ROOT}/build/Debug")
 endif()
 
-find_library(APRILTAG_LIB
-    NAMES apriltag
-    HINTS ${_apriltag_library_hints}
-    PATHS /usr/lib /usr/local/lib /usr/lib/aarch64-linux-gnu /usr/lib/arm-linux-gnueabihf /opt/homebrew/lib
-)
+set(APRILTAG_BUNDLED FALSE)
+if(NOT FORCE_BUNDLED_APRILTAG)
+    find_path(APRILTAG_INCLUDE_DIR
+        NAMES apriltag.h
+        HINTS ${_apriltag_include_hints}
+        PATHS /usr/include /usr/local/include /opt/homebrew/include
+        PATH_SUFFIXES apriltag
+    )
 
-if(NOT APRILTAG_LIB)
-    message(FATAL_ERROR "AprilTag library not found. Set APRILTAG_ROOT or install apriltag.")
+    find_library(APRILTAG_LIB
+        NAMES apriltag
+        HINTS ${_apriltag_library_hints}
+        PATHS /usr/lib /usr/local/lib /usr/lib/aarch64-linux-gnu /usr/lib/arm-linux-gnueabihf /opt/homebrew/lib
+    )
+
+    if(APRILTAG_INCLUDE_DIR AND APRILTAG_LIB)
+        message(STATUS "Found AprilTag (system): ${APRILTAG_LIB}")
+    endif()
 endif()
 
-message(STATUS "Found AprilTag: ${APRILTAG_LIB}")
+if(NOT APRILTAG_INCLUDE_DIR OR NOT APRILTAG_LIB)
+    message(STATUS "System AprilTag not found, fetching source...")
+    include(FetchContent)
+    FetchContent_Declare(
+            apriltag
+            GIT_REPOSITORY https://github.com/AprilRobotics/apriltag.git
+            GIT_TAG 3.2.0
+    )
+    FetchContent_MakeAvailable(apriltag)
+    set(APRILTAG_BUNDLED TRUE)
+    message(STATUS "Using bundled AprilTag from ${apriltag_SOURCE_DIR}")
+endif()
 
 message(STATUS "OpenCV version: ${OpenCV_VERSION}")
 message(STATUS "OpenCV libs: ${OpenCV_LIBS}")
@@ -90,15 +101,23 @@ add_executable(${PROJECT_NAME} ${SOURCES})
 
 target_include_directories(${PROJECT_NAME} PRIVATE
         ${OpenCV_INCLUDE_DIRS}
-        ${APRILTAG_INCLUDE_DIR}
         ${EIGEN3_INCLUDE_DIR})
+
+if(NOT APRILTAG_BUNDLED)
+    target_include_directories(${PROJECT_NAME} PRIVATE ${APRILTAG_INCLUDE_DIR})
+endif()
 target_compile_definitions(${PROJECT_NAME} PRIVATE NOMINMAX)
 
 # Link libraries
+set(_apriltag_link_target ${APRILTAG_LIB})
+if(APRILTAG_BUNDLED)
+    set(_apriltag_link_target apriltag)
+endif()
+
 target_link_libraries(${PROJECT_NAME}
         ${OpenCV_LIBS}
         Eigen3::Eigen
-        ${APRILTAG_LIB}
+        ${_apriltag_link_target}
 )
 
 #

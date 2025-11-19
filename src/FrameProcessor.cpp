@@ -6,7 +6,6 @@
 #include <cmath>
 #include <sstream>
 #include <iomanip>
-#include <limits>
 
 // Undefine Windows macros
 #ifdef max
@@ -91,13 +90,6 @@ FrameProcessor::FrameProcessor()
     , baseDecimate_(config::DEFAULT_DECIMATE)
     , useWhitelist_(false)
     , useBlacklist_(false)
-    , highSpeedMode_(false)
-    , useROITracking_(false)
-    , activeROI_()
-    , roiMissCount_(0)
-    , userCLAHEPref_(true)
-    , userGamma_(1.25)
-    , userDecimate_(config::DEFAULT_DECIMATE)
     , sceneHasUnseen_(false)
     , detectionRate_(config::DETECTION_RATE_HZ)
     , emaPosAlpha_(config::EMA_ALPHA_POS)
@@ -110,10 +102,6 @@ FrameProcessor::FrameProcessor()
                              cv::Size(config::CLAHE_TILE_SIZE, config::CLAHE_TILE_SIZE));
 
     buildGammaLUT(gamma_);
-
-    userCLAHEPref_ = useCLAHE_;
-    userGamma_ = gamma_;
-    userDecimate_ = baseDecimate_;
 
     std::cout << "[FrameProcessor] Initialized" << std::endl;
 }
@@ -130,52 +118,10 @@ void FrameProcessor::setEMAAlpha(double pos, double pose) {
     emaPoseAlpha_ = pose;
 }
 
-void FrameProcessor::setDecimate(int dec) {
-    userDecimate_ = std::max(1, dec);
-    if (!highSpeedMode_) {
-        baseDecimate_ = userDecimate_;
-    }
-}
-
-void FrameProcessor::enableCLAHE(bool enable) {
-    userCLAHEPref_ = enable;
-    if (!highSpeedMode_) {
-        useCLAHE_ = enable;
-    }
-}
-
 void FrameProcessor::setGamma(double gamma) {
-    userGamma_ = gamma;
-    if (!highSpeedMode_) {
-        applyGammaInternal(gamma);
-    }
-}
-
-void FrameProcessor::applyGammaInternal(double gamma) {
     if (std::abs(gamma - gamma_) > 1e-6) {
         gamma_ = gamma;
         buildGammaLUT(gamma);
-    }
-}
-
-void FrameProcessor::setHighSpeedMode(bool enable) {
-    if (highSpeedMode_ == enable) return;
-    highSpeedMode_ = enable;
-
-    if (highSpeedMode_) {
-        useROITracking_ = true;
-        useCLAHE_ = false;
-        applyGammaInternal(config::HIGH_SPEED_GAMMA);
-        baseDecimate_ = std::max(1, config::HIGH_SPEED_DECIMATE);
-        if (detector_) detector_->setRefineEdges(false);
-        resetROI();
-    } else {
-        useROITracking_ = false;
-        useCLAHE_ = userCLAHEPref_;
-        applyGammaInternal(userGamma_);
-        baseDecimate_ = userDecimate_;
-        if (detector_) detector_->setRefineEdges(true);
-        resetROI();
     }
 }
 
@@ -229,62 +175,6 @@ bool FrameProcessor::shouldProcessTag(int id) {
     return true;
 }
 
-void FrameProcessor::resetROI() {
-    activeROI_ = cv::Rect();
-    roiMissCount_ = 0;
-}
-
-cv::Rect FrameProcessor::expandROI(const cv::Rect& base, int width, int height) const {
-    if (base.width <= 0 || base.height <= 0) return cv::Rect();
-
-    const int margin = config::HIGH_SPEED_ROI_MARGIN_PX;
-    const double grow = config::HIGH_SPEED_ROI_EXPAND_PCT;
-    const int extraX = margin + static_cast<int>(std::round(base.width * grow));
-    const int extraY = margin + static_cast<int>(std::round(base.height * grow));
-
-    int x = std::max(0, base.x - extraX);
-    int y = std::max(0, base.y - extraY);
-    int w = std::min(width - x, base.width + 2 * extraX);
-    int h = std::min(height - y, base.height + 2 * extraY);
-
-    w = std::max(w, std::min(width, config::HIGH_SPEED_ROI_MIN_W));
-    h = std::max(h, std::min(height, config::HIGH_SPEED_ROI_MIN_H));
-
-    if (x + w > width) w = width - x;
-    if (y + h > height) h = height - y;
-
-    return cv::Rect(x, y, std::max(1, w), std::max(1, h));
-}
-
-cv::Rect FrameProcessor::computeHistoryROI(int width, int height) const {
-    if (lastCorners_.empty()) return cv::Rect();
-
-    float minX = std::numeric_limits<float>::max();
-    float minY = std::numeric_limits<float>::max();
-    float maxX = std::numeric_limits<float>::lowest();
-    float maxY = std::numeric_limits<float>::lowest();
-    bool hasPoint = false;
-
-    for (const auto& kv : lastCorners_) {
-        for (const auto& pt : kv.second) {
-            minX = std::min(minX, pt.x);
-            minY = std::min(minY, pt.y);
-            maxX = std::max(maxX, pt.x);
-            maxY = std::max(maxY, pt.y);
-            hasPoint = true;
-        }
-    }
-
-    if (!hasPoint) return cv::Rect();
-
-    const int x0 = std::max(0, static_cast<int>(std::floor(minX)));
-    const int y0 = std::max(0, static_cast<int>(std::floor(minY)));
-    const int x1 = std::min(width, static_cast<int>(std::ceil(maxX)));
-    const int y1 = std::min(height, static_cast<int>(std::ceil(maxY)));
-    cv::Rect base(x0, y0, std::max(1, x1 - x0), std::max(1, y1 - y0));
-    return expandROI(base, width, height);
-}
-
 cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stats) {
     auto t0 = std::chrono::high_resolution_clock::now();
 
@@ -317,44 +207,13 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
     cv::Mat grayProc = preprocessImage(gray);
     if (!grayProc.isContinuous()) grayProc = grayProc.clone();  // stride safety
 
-    cv::Rect roiToUse(0, 0, w, h);
-    bool usingROI = false;
-    if (useROITracking_) {
-        cv::Rect candidate = activeROI_.area() > 0 ? activeROI_ : computeHistoryROI(w, h);
-        if (candidate.width > 0 && candidate.height > 0 && candidate.area() < w * h) {
-            roiToUse = candidate;
-            usingROI = true;
-        }
-    }
-
     // Adaptive decimation based on blur → handed to AprilTag (internal decimate)
     const double blurVar = computeBlurVariance(grayProc);
     const int decimate = chooseDecimate(baseDecimate_, blurVar);
     detector_->setDecimate(static_cast<float>(decimate));
 
-    cv::Mat detectInput;
-    if (usingROI) {
-        cv::Mat roiView(grayProc, roiToUse);
-        if (roiBuf_.empty() || roiBuf_.size() != roiToUse.size()) {
-            roiBuf_.create(roiToUse.size(), grayProc.type());
-        }
-        roiView.copyTo(roiBuf_);
-        detectInput = roiBuf_;
-    } else {
-        detectInput = grayProc;
-    }
-
     // Detect tags ON THE SAME IMAGE we'll refine on
-    std::vector<Detection> detections = detector_->detect(detectInput);
-
-    if (usingROI) {
-        const cv::Point2f offset(static_cast<float>(roiToUse.x), static_cast<float>(roiToUse.y));
-        for (auto& det : detections) {
-            for (auto& pt : det.corners) {
-                pt += offset;
-            }
-        }
-    }
+    std::vector<Detection> detections = detector_->detect(grayProc);
 
     // Filter detections
     std::vector<Detection> filtered;
@@ -370,11 +229,6 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
 
     std::set<int> visibleIds;
     std::vector<TagData> tagDataList;
-    float roiMinX = std::numeric_limits<float>::max();
-    float roiMinY = std::numeric_limits<float>::max();
-    float roiMaxX = std::numeric_limits<float>::lowest();
-    float roiMaxY = std::numeric_limits<float>::lowest();
-    bool roiHasData = false;
 
     // Process each detection
     for (auto& det : filtered) {
@@ -400,16 +254,6 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         // Update tracker
         updateTracker(det.id, corners);
         lastCorners_[det.id] = corners;
-
-        if (useROITracking_) {
-            for (const auto& pt : corners) {
-                roiMinX = std::min(roiMinX, pt.x);
-                roiMinY = std::min(roiMinY, pt.y);
-                roiMaxX = std::max(roiMaxX, pt.x);
-                roiMaxY = std::max(roiMaxY, pt.y);
-            }
-            roiHasData = true;
-        }
 
         // Compute Limelight-style values
         double tx_deg, ty_deg, ta_percent;
@@ -471,27 +315,8 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         drawDetection(vis, det, corners, tx_deg, ty_deg, ta_percent, tvec);
     }
 
-    if (useROITracking_) {
-        if (roiHasData) {
-            const int x0 = std::max(0, static_cast<int>(std::floor(roiMinX)));
-            const int y0 = std::max(0, static_cast<int>(std::floor(roiMinY)));
-            const int x1 = std::min(w, static_cast<int>(std::ceil(roiMaxX)));
-            const int y1 = std::min(h, static_cast<int>(std::ceil(roiMaxY)));
-            cv::Rect base(x0, y0, std::max(1, x1 - x0), std::max(1, y1 - y0));
-            activeROI_ = expandROI(base, w, h);
-            roiMissCount_ = 0;
-        } else if (activeROI_.area() > 0) {
-            ++roiMissCount_;
-            if (roiMissCount_ >= config::HIGH_SPEED_ROI_MAX_MISSES) {
-                resetROI();
-            } else {
-                activeROI_ = expandROI(activeROI_, w, h);
-            }
-        }
-    }
-
     // Predict invisible tags (optical flow + Kalman)
-    if (!highSpeedMode_ && !prevGray_.empty()) {
+    if (!prevGray_.empty()) {
         predictInvisibleTags(vis, w, h, visibleIds, prevGray_, gray);
     }
 
@@ -555,12 +380,8 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
 
     stats.detectionRateHz = detectionRate_;
     stats.avgProcessTimeMs = procTimeMs;
-    stats.frameTimeMs = procTimeMs;
     stats.tagCount = static_cast<int>(filtered.size());
     stats.blurVariance = blurVar;
-    stats.highSpeedMode = highSpeedMode_;
-    stats.usedROI = usingROI;
-    stats.roiRect = usingROI ? roiToUse : cv::Rect();
 
     return vis;
 }

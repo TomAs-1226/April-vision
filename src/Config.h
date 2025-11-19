@@ -22,27 +22,6 @@ inline constexpr int FRAME_UI_MS = 12;
 inline constexpr int CAM_WARMUP_FRAMES = 12;
 inline constexpr int CAM_WARMUP_DELAY_MS = 8;
 inline constexpr bool CAM_FORCE_MJPEG = true;
-inline constexpr int DEFAULT_FRAME_WIDTH = 640;
-inline constexpr int DEFAULT_FRAME_HEIGHT = 480;
-
-#if defined(__arm__) || defined(__aarch64__)
-inline constexpr bool DEFAULT_HIGH_SPEED_MODE = true;   // Raspberry Pi / ARM defaults to high speed
-#else
-inline constexpr bool DEFAULT_HIGH_SPEED_MODE = false;
-#endif
-
-inline constexpr int HIGH_SPEED_FRAME_WIDTH = 424;
-inline constexpr int HIGH_SPEED_FRAME_HEIGHT = 240;
-inline constexpr int HIGH_SPEED_TARGET_FPS = 120;
-inline constexpr int HIGH_SPEED_DECIMATE = 1;
-inline constexpr double HIGH_SPEED_GAMMA = 1.0;
-inline constexpr int HIGH_SPEED_ROI_MARGIN_PX = 18;
-inline constexpr int HIGH_SPEED_ROI_MIN_W = 96;
-inline constexpr int HIGH_SPEED_ROI_MIN_H = 96;
-inline constexpr int HIGH_SPEED_ROI_MAX_MISSES = 4;
-inline constexpr double HIGH_SPEED_ROI_EXPAND_PCT = 0.18;
-
-// Toggling DEFAULT_HIGH_SPEED_MODE=false restores full-quality desktop tuning.
 
 // Performance tuning
 inline constexpr int DETECTION_RATE_HZ = 60;
