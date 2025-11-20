@@ -81,9 +81,12 @@ private:
 
     // Tracking helpers
     void updateTracker(int id, const std::vector<cv::Point2f>& corners);
+    bool computePoseForCorners(int id, const std::vector<cv::Point2f>& corners,
+                               cv::Vec3d& tvec, cv::Vec3d& rvec, double& reprojErr);
     void predictInvisibleTags(cv::Mat& vis, int width, int height,
                              const std::set<int>& visibleIds,
-                             const cv::Mat& grayPrev, const cv::Mat& grayCurr);
+                             const cv::Mat& grayPrev, const cv::Mat& grayCurr,
+                             std::vector<TagData>& tagDataOut, ProcessingStats& stats);
     void purgeOldTrackers(const std::set<int>& visibleIds);
 
     // Visualization

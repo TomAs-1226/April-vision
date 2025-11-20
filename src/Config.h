@@ -53,9 +53,9 @@ inline constexpr bool DEFAULT_HIGH_SPEED_MODE = true;
 // Use capture resolution in high-speed mode (no forced downscale).
 inline constexpr int HIGH_SPEED_WIDTH = 0;
 inline constexpr int HIGH_SPEED_HEIGHT = 0;
-inline constexpr double HIGH_SPEED_ROI_INFLATION = 1.8;
-inline constexpr int HIGH_SPEED_ROI_PERSISTENCE = 4;
-inline constexpr int HIGH_SPEED_MIN_ROI_EDGE = 28;
+inline constexpr double HIGH_SPEED_ROI_INFLATION = 2.4;
+inline constexpr int HIGH_SPEED_ROI_PERSISTENCE = 5;
+inline constexpr int HIGH_SPEED_MIN_ROI_EDGE = 56;
 inline constexpr double HIGH_SPEED_ACCURACY_BONUS = 0.12; // refine pose smoothing for HS mode
 inline constexpr int HIGH_SPEED_MIN_DECIMATE = 3;
 
@@ -107,11 +107,11 @@ inline constexpr double TRACK_Q = 0.02;
 inline constexpr double TRACK_R = 4.0;
 
 // EMA smoothing defaults
-inline constexpr double EMA_ALPHA_POS = 0.28;
-inline constexpr double EMA_ALPHA_POSE = 0.22;
+inline constexpr double EMA_ALPHA_POS = 0.48;
+inline constexpr double EMA_ALPHA_POSE = 0.42;
 
 // Pose median smoothing window
-inline constexpr int POSE_MEDIAN_WINDOW = 5;
+inline constexpr int POSE_MEDIAN_WINDOW = 3;
 
 // Safety/CPU thresholds
 inline constexpr double PROCESS_TIME_HIGH_MS = 18.0;

@@ -444,51 +444,16 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         PoseEstimator::computeLimelightValues(corners, cameraMatrix_, w, h,
                                               tx_deg, ty_deg, ta_percent);
 
-        const double diag = cv::norm(corners[0] - corners[2]);
         cv::Vec3d tvec(0, 0, 0), rvec(0, 0, 0);
         double reprojErr = 0.0;
 
-        if (diag >= 14.0) {
-            auto poseResult = poseEstimator_->solvePose(corners, tagSizeM_,
-                                                        cameraMatrix_, distCoeffs_);
-            if (poseResult) {
-                auto& posSmooth = posSmoothers_[det.id];
-                if (!posSmooth || std::abs(posSmooth->getAlpha() - emaPosAlpha_) > 1e-9)
-                    posSmooth = std::make_unique<EMASmoother>(emaPosAlpha_);
-                Eigen::Vector3d tvecE(poseResult->tvec[0], poseResult->tvec[1], poseResult->tvec[2]);
-                Eigen::VectorXd sPos = posSmooth->update(tvecE);
-
-                auto& poseSmooth = poseSmoothers_[det.id];
-                if (!poseSmooth || std::abs(poseSmooth->getAlpha() - emaPoseAlpha_) > 1e-9)
-                    poseSmooth = std::make_unique<EMASmoother>(emaPoseAlpha_);
-                Eigen::Vector3d rvecE(poseResult->rvec[0], poseResult->rvec[1], poseResult->rvec[2]);
-                Eigen::VectorXd sRot = poseSmooth->update(rvecE);
-
-                if (config::POSE_MEDIAN_WINDOW > 1) {
-                    auto& med = poseMedians_[det.id];
-                    if (!med) med = std::make_unique<MedianBuffer>(config::POSE_MEDIAN_WINDOW);
-                    Eigen::VectorXd both(6); both << sPos, sRot;
-                    med->push(both);
-                    if (auto m = med->median()) {
-                        tvec = cv::Vec3d((*m)(0), (*m)(1), (*m)(2));
-                        rvec = cv::Vec3d((*m)(3), (*m)(4), (*m)(5));
-                    } else {
-                        tvec = cv::Vec3d(sPos(0), sPos(1), sPos(2));
-                        rvec = cv::Vec3d(sRot(0), sRot(1), sRot(2));
-                    }
-                } else {
-                    tvec = cv::Vec3d(sPos(0), sPos(1), sPos(2));
-                    rvec = cv::Vec3d(sRot(0), sRot(1), sRot(2));
-                }
-
-                reprojErr = poseResult->reprojError;
-
-                TagData td;
-                td.id = det.id;
-                td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta_percent;
-                td.tvec = tvec; td.rvec = rvec; td.reprojError = reprojErr;
-                tagDataList.push_back(td);
-            }
+        if (cv::norm(corners[0] - corners[2]) >= 14.0 &&
+            computePoseForCorners(det.id, corners, tvec, rvec, reprojErr)) {
+            TagData td;
+            td.id = det.id;
+            td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta_percent;
+            td.tvec = tvec; td.rvec = rvec; td.reprojError = reprojErr;
+            tagDataList.push_back(td);
         }
 
         const bool poseValid = cv::norm(tvec) > 0.0;
@@ -503,7 +468,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
     }
 
     if (!prevGray_.empty()) {
-        predictInvisibleTags(vis, w, h, visibleIds, prevGray_, grayFull);
+        predictInvisibleTags(vis, w, h, visibleIds, prevGray_, grayFull, tagDataList, stats);
     }
 
     if (visibleIds.empty()) {
@@ -590,9 +555,51 @@ void FrameProcessor::updateTracker(int id, const std::vector<cv::Point2f>& corne
     lkLastPts_[id] = corners;
 }
 
+bool FrameProcessor::computePoseForCorners(int id, const std::vector<cv::Point2f>& corners,
+                                           cv::Vec3d& tvec, cv::Vec3d& rvec, double& reprojErr)
+{
+    auto poseResult = poseEstimator_->solvePose(corners, tagSizeM_, cameraMatrix_, distCoeffs_);
+    if (!poseResult) {
+        return false;
+    }
+
+    auto& posSmooth = posSmoothers_[id];
+    if (!posSmooth || std::abs(posSmooth->getAlpha() - emaPosAlpha_) > 1e-9)
+        posSmooth = std::make_unique<EMASmoother>(emaPosAlpha_);
+    Eigen::Vector3d tvecE(poseResult->tvec[0], poseResult->tvec[1], poseResult->tvec[2]);
+    Eigen::VectorXd sPos = posSmooth->update(tvecE);
+
+    auto& poseSmooth = poseSmoothers_[id];
+    if (!poseSmooth || std::abs(poseSmooth->getAlpha() - emaPoseAlpha_) > 1e-9)
+        poseSmooth = std::make_unique<EMASmoother>(emaPoseAlpha_);
+    Eigen::Vector3d rvecE(poseResult->rvec[0], poseResult->rvec[1], poseResult->rvec[2]);
+    Eigen::VectorXd sRot = poseSmooth->update(rvecE);
+
+    if (config::POSE_MEDIAN_WINDOW > 1) {
+        auto& med = poseMedians_[id];
+        if (!med) med = std::make_unique<MedianBuffer>(config::POSE_MEDIAN_WINDOW);
+        Eigen::VectorXd both(6); both << sPos, sRot;
+        med->push(both);
+        if (auto m = med->median()) {
+            tvec = cv::Vec3d((*m)(0), (*m)(1), (*m)(2));
+            rvec = cv::Vec3d((*m)(3), (*m)(4), (*m)(5));
+        } else {
+            tvec = cv::Vec3d(sPos(0), sPos(1), sPos(2));
+            rvec = cv::Vec3d(sRot(0), sRot(1), sRot(2));
+        }
+    } else {
+        tvec = cv::Vec3d(sPos(0), sPos(1), sPos(2));
+        rvec = cv::Vec3d(sRot(0), sRot(1), sRot(2));
+    }
+
+    reprojErr = poseResult->reprojError;
+    return true;
+}
+
 void FrameProcessor::predictInvisibleTags(cv::Mat& vis, int width, int height,
                                          const std::set<int>& visibleIds,
-                                         const cv::Mat& grayPrev, const cv::Mat& grayCurr)
+                                         const cv::Mat& grayPrev, const cv::Mat& grayCurr,
+                                         std::vector<TagData>& tagDataOut, ProcessingStats& stats)
 {
     for (auto it = trackers_.begin(); it != trackers_.end(); ++it) {
         int id = it->first;
@@ -656,6 +663,29 @@ void FrameProcessor::predictInvisibleTags(cv::Mat& vis, int width, int height,
                 for (const auto& pt : p1)
                     pts.emplace_back(static_cast<int>(pt.x), static_cast<int>(pt.y));
                 cv::polylines(vis, pts, true, cv::Scalar(0, 180, 255), 2, cv::LINE_AA);
+
+                cv::Vec3d tvec(0, 0, 0), rvec(0, 0, 0);
+                double reprojErr = 0.0;
+                if (cameraMatrix_.total() > 0 && computePoseForCorners(id, p1, tvec, rvec, reprojErr)) {
+                    double tx_deg = 0.0, ty_deg = 0.0, ta = 0.0;
+                    PoseEstimator::computeLimelightValues(p1, cameraMatrix_, width, height, tx_deg, ty_deg, ta);
+
+                    TagData td;
+                    td.id = id;
+                    td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta;
+                    td.tvec = tvec; td.rvec = rvec; td.reprojError = reprojErr;
+                    tagDataOut.push_back(td);
+
+                    if (!stats.hasPose) {
+                        stats.hasPose = true;
+                        stats.poseTvec = tvec;
+                        stats.poseRvec = rvec;
+                        stats.poseEuler = rvecToEuler(rvec);
+                    }
+
+                    cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, rvec, tvec,
+                                      static_cast<float>(tagSizeM_), 2);
+                }
 
                 drewOpticalFlow = true;
             }

@@ -447,6 +447,14 @@ void VisionApp::captureLoop() {
     int autoExpCache = autoExposure_.load();
     auto lastApply = std::chrono::steady_clock::now();
 
+    // Apply initial camera controls immediately so UI sliders take effect
+    cap_->set(cv::CAP_PROP_AUTO_EXPOSURE, autoExpCache ? 0.75 : 0.25);
+    if (!autoExpCache) {
+        cap_->set(cv::CAP_PROP_EXPOSURE, sliderToPropertyValue(exposureCache, exposureRange));
+        cap_->set(cv::CAP_PROP_GAIN, sliderToPropertyValue(gainCache, gainRange));
+        cap_->set(cv::CAP_PROP_BRIGHTNESS, sliderToPropertyValue(brightnessCache, brightnessRange));
+    }
+
     while (captureRunning_ && cap_ && cap_->isOpened()) {
         cv::Mat frame;
         if (!cap_->read(frame) || frame.empty()) {
@@ -838,7 +846,7 @@ std::string WebDashboard::dashboardHtml() {
 <body>
   <div class='top'>
     <div>
-      <div style='font-size:14px;color:#8b949e'>AprilTag Vision</div>
+      <div style='font-size:14px;color:#8b949e'>Limelight-style control</div>
       <div style='font-size:22px;font-weight:700;'>" << config::WEB_DASHBOARD_TITLE << R"(</div>
     </div>
     <div id='ipList' style='font-size:14px;color:#8b949e'></div>
@@ -985,6 +993,15 @@ std::string WebDashboard::dashboardHtml() {
       document.getElementById('toggleCLAHE').onclick = ()=> { setToggle('toggleCLAHE', !isOn('toggleCLAHE')); sendSettings(); };
       document.getElementById('toggleAuto').onclick = ()=> { setToggle('toggleAuto', !isOn('toggleAuto')); sendSettings(); };
       document.getElementById('toggleDiag').onclick = ()=> { setToggle('toggleDiag', !isOn('toggleDiag')); sendSettings(); };
+      ['exposure','gain','brightness'].forEach(id=>{
+        const el=document.getElementById(id);
+        if(el){ el.oninput = ()=>sendSettings(); }
+      });
+      const ntField = document.getElementById('ntServer');
+      if (ntField) {
+        ntField.onchange = ()=> sendSettings();
+        ntField.onkeypress = (e)=>{ if(e.key==='Enter') sendSettings(); };
+      }
       document.getElementById('saveBtn').onclick = ()=> sendSettings();
       document.getElementById('resetBtn').onclick = ()=> { fetch('/api/reset_roi').then(()=>refreshState()); };
 
