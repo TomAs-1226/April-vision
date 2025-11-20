@@ -771,7 +771,11 @@ void WebDashboard::handleState(const httplib::Request&, httplib::Response& res) 
 
 void WebDashboard::handleSettings(const httplib::Request& req, httplib::Response& res) {
     auto snap = app_.getSettings();
-    snap.highSpeed = paramOn(req, "highSpeed", snap.highSpeed);
+    bool requestedHighSpeed = paramOn(req, "highSpeed", snap.highSpeed);
+    if (req.has_param("fullQuality")) {
+        requestedHighSpeed = !paramOn(req, "fullQuality", !requestedHighSpeed);
+    }
+    snap.highSpeed = requestedHighSpeed;
     snap.fastPreview = paramOn(req, "fastPreview", snap.fastPreview);
     snap.publishNT = paramOn(req, "publishNT", snap.publishNT);
     snap.roiOverlay = paramOn(req, "roiOverlay", snap.roiOverlay);
@@ -798,57 +802,191 @@ void WebDashboard::handleSettings(const httplib::Request& req, httplib::Response
 
 std::string WebDashboard::dashboardHtml() {
     std::ostringstream html;
-    html << "<!DOCTYPE html><html><head><meta charset='utf-8'><title>" << config::WEB_DASHBOARD_TITLE << "</title>";
-    html << "<style>body{font-family:Inter,Helvetica,Arial,sans-serif;margin:0;background:#0d1117;color:#e6edf3;}";
-    html << ".top{padding:18px 24px;background:#161b22;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #30363d;}";
-    html << ".card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin:12px;box-shadow:0 10px 30px rgba(0,0,0,0.3);}";
-    html << ".grid{display:grid;grid-template-columns:2fr 1fr;gap:12px;}";
-    html << ".pill{padding:4px 10px;border-radius:12px;background:#238636;color:white;font-weight:600;font-size:12px;}";
-    html << ".controls label{display:block;margin-bottom:10px;} .controls input, .controls select{width:100%;padding:8px;border-radius:8px;border:1px solid #30363d;background:#0d1117;color:#e6edf3;}";
-    html << ".toggle-row{display:flex;gap:10px;flex-wrap:wrap;} .toggle{padding:8px 12px;border-radius:8px;border:1px solid #30363d;cursor:pointer;background:#0d1117;}";
-    html << ".toggle.active{background:#1f6feb;border-color:#388bfd;color:white;}";
-    html << "img.stream{width:100%;border-radius:10px;border:1px solid #30363d;background:#000;}";
-    html << "</style></head><body>";
-    html << "<div class='top'><div><div style='font-size:14px;color:#8b949e'>AprilTag Vision</div><div style='font-size:22px;font-weight:700;'>" << config::WEB_DASHBOARD_TITLE << "</div></div>";
-    html << "<div id='ipList' style='font-size:14px;color:#8b949e'></div></div>";
-    html << "<div class='grid'><div class='card'><div style='display:flex;align-items:center;justify-content:space-between;'>";
-    html << "<div><div style='font-size:13px;color:#8b949e'>Live Stream</div><div style='font-size:18px;font-weight:700;'>Limelight-style view</div></div>";
-    html << "<div class='pill' id='modePill'>High-Speed</div></div>";
-    html << "<div style='margin-top:10px;'><img class='stream' src='/stream.mjpg?view=fast' /></div>";
-    html << "<div id='stats' style='margin-top:12px;font-family:SFMono-Regular,Consolas,monospace;color:#e6edf3;'></div>";
-    html << "<div id='pose' style='margin-top:6px;font-family:SFMono-Regular,Consolas,monospace;color:#8b949e;'></div>";
-    html << "</div>";
-    html << "<div><div class='card controls'><div style='font-size:13px;color:#8b949e'>Pipeline Controls</div>";
-    html << "<div class='toggle-row'>"
-         << "<div class='toggle' id='toggleHigh'>High-Speed</div>"
-         << "<div class='toggle' id='toggleFull'>Full-Quality</div>"
-         << "<div class='toggle' id='previewFast'>Preview: Fast</div>"
-         << "<div class='toggle' id='previewFull'>Preview: Full</div>"
-         << "<div class='toggle' id='toggleNT'>NetworkTables</div>"
-         << "<div class='toggle' id='toggleUDP'>UDP</div>"
-         << "<div class='toggle' id='toggleROI'>ROI Overlay</div>"
-         << "<div class='toggle' id='toggleGray'>Gray Preview</div>"
-         << "<div class='toggle' id='toggleCLAHE'>CLAHE</div>"
-         << "<div class='toggle' id='toggleAuto'>Auto Exposure</div>"
-         << "<div class='toggle' id='toggleDiag'>Diagnostics</div>"
-         << "</div>";
-    html << "<label>Decimate<input type='number' id='decimate' min='1' max='5' /></label>";
-    html << "<label>Gamma<input type='number' id='gamma' step='0.05' min='0.5' max='3.0' /></label>";
-    html << "<label>EMA Position<input type='number' id='emaPos' step='0.01' min='0.01' max='0.99' /></label>";
-    html << "<label>EMA Pose<input type='number' id='emaPose' step='0.01' min='0.01' max='0.99' /></label>";
-    html << "<label>Exposure<input type='range' id='exposure' min='0' max='" << static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE) << "' /></label>";
-    html << "<label>Gain<input type='range' id='gain' min='0' max='" << static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE) << "' /></label>";
-    html << "<label>Brightness<input type='range' id='brightness' min='0' max='" << static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE) << "' /></label>";
-    html << "<label>NT Server<input type='text' id='ntServer' placeholder='10.xx.yy.2' /></label>";
-    html << "<div style='display:flex;gap:10px;'><button id='saveBtn' style='flex:1;padding:10px;border-radius:8px;border:none;background:#1f6feb;color:white;font-weight:700;cursor:pointer;'>Apply</button>";
-    html << "<button id='resetBtn' style='padding:10px;border-radius:8px;border:1px solid #30363d;background:#0d1117;color:#e6edf3;cursor:pointer;'>Reset ROI</button></div>";
-    html << "</div></div></div>";
+    html << R"(<!DOCTYPE html>
+<html lang='en'>
+<head>
+  <meta charset='utf-8'>
+  <title>)" << config::WEB_DASHBOARD_TITLE << R"(</title>
+  <style>
+    body{font-family:Inter,Helvetica,Arial,sans-serif;margin:0;background:#0d1117;color:#e6edf3;}
+    .top{padding:18px 24px;background:#161b22;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #30363d;}
+    .card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin:12px;box-shadow:0 10px 30px rgba(0,0,0,0.3);} 
+    .grid{display:grid;grid-template-columns:2fr 1fr;gap:12px;}
+    .pill{padding:4px 10px;border-radius:12px;background:#238636;color:white;font-weight:600;font-size:12px;}
+    .controls label{display:block;margin-bottom:10px;}
+    .controls input,.controls select{width:100%;padding:8px;border-radius:8px;border:1px solid #30363d;background:#0d1117;color:#e6edf3;}
+    .toggle-row{display:flex;gap:10px;flex-wrap:wrap;}
+    .toggle{padding:8px 12px;border-radius:8px;border:1px solid #30363d;cursor:pointer;background:#0d1117;user-select:none;}
+    .toggle.active{background:#1f6feb;border-color:#388bfd;color:white;}
+    img.stream{width:100%;border-radius:10px;border:1px solid #30363d;background:#000;}
+    button.primary{padding:10px;border-radius:8px;border:none;background:#1f6feb;color:white;font-weight:700;cursor:pointer;}
+    button.ghost{padding:10px;border-radius:8px;border:1px solid #30363d;background:#0d1117;color:#e6edf3;cursor:pointer;}
+  </style>
+</head>
+<body>
+  <div class='top'>
+    <div>
+      <div style='font-size:14px;color:#8b949e'>AprilTag Vision</div>
+      <div style='font-size:22px;font-weight:700;'>" << config::WEB_DASHBOARD_TITLE << R"(</div>
+    </div>
+    <div id='ipList' style='font-size:14px;color:#8b949e'></div>
+  </div>
+  <div class='grid'>
+    <div class='card'>
+      <div style='display:flex;align-items:center;justify-content:space-between;'>
+        <div>
+          <div style='font-size:13px;color:#8b949e'>Live Stream</div>
+          <div style='font-size:18px;font-weight:700;'>Limelight-style view</div>
+        </div>
+        <div class='pill' id='modePill'>High-Speed</div>
+      </div>
+      <div style='margin-top:10px;'><img id='stream' class='stream' src='/stream.mjpg?view=fast' /></div>
+      <div id='stats' style='margin-top:12px;font-family:SFMono-Regular,Consolas,monospace;color:#e6edf3;'></div>
+      <div id='pose' style='margin-top:6px;font-family:SFMono-Regular,Consolas,monospace;color:#8b949e;'></div>
+    </div>
+    <div>
+      <div class='card controls'>
+        <div style='font-size:13px;color:#8b949e'>Pipeline Controls</div>
+        <div class='toggle-row'>
+          <div class='toggle' id='toggleHigh'>High-Speed</div>
+          <div class='toggle' id='toggleFull'>Full-Quality</div>
+          <div class='toggle' id='previewFast'>Preview: Fast</div>
+          <div class='toggle' id='previewFull'>Preview: Full</div>
+          <div class='toggle' id='toggleNT'>NetworkTables</div>
+          <div class='toggle' id='toggleUDP'>UDP</div>
+          <div class='toggle' id='toggleROI'>ROI Overlay</div>
+          <div class='toggle' id='toggleGray'>Gray Preview</div>
+          <div class='toggle' id='toggleCLAHE'>CLAHE</div>
+          <div class='toggle' id='toggleAuto'>Auto Exposure</div>
+          <div class='toggle' id='toggleDiag'>Diagnostics</div>
+        </div>
+        <label>Decimate<input type='number' id='decimate' min='1' max='5' /></label>
+        <label>Gamma<input type='number' id='gamma' step='0.05' min='0.5' max='3.0' /></label>
+        <label>EMA Position<input type='number' id='emaPos' step='0.01' min='0.01' max='0.99' /></label>
+        <label>EMA Pose<input type='number' id='emaPose' step='0.01' min='0.01' max='0.99' /></label>
+        <label>Exposure<input type='range' id='exposure' min='0' max='" << static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE) << R"(' /></label>
+        <label>Gain<input type='range' id='gain' min='0' max='" << static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE) << R"(' /></label>
+        <label>Brightness<input type='range' id='brightness' min='0' max='" << static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE) << R"(' /></label>
+        <label>NT Server<input type='text' id='ntServer' placeholder='10.xx.yy.2' /></label>
+        <div style='display:flex;gap:10px;'>
+          <button id='saveBtn' class='primary' style='flex:1;'>Apply</button>
+          <button id='resetBtn' class='ghost'>Reset ROI</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    const toggles = ['toggleHigh','toggleFull','previewFast','previewFull','toggleNT','toggleUDP','toggleROI','toggleGray','toggleCLAHE','toggleAuto','toggleDiag'];
+    let streamMode = 'fast';
 
-    html << "<script>\nconst DASH_PORT=" << config::WEB_PORT << ";\nconst toggles=[['toggleHigh','highSpeed'],['toggleFull','fullQuality'],['toggleNT','publishNT'],['toggleUDP','udp'],['toggleROI','roiOverlay'],['toggleGray','grayPreview'],['toggleCLAHE','clahe'],['toggleAuto','autoExposure'],['toggleDiag','diagnostics'],['previewFast','fastPreview'],['previewFull','fullPreview']];\nlet state={};\nfunction setToggle(id,on){const el=document.getElementById(id);if(!el)return;el.classList.toggle('active',on);}\nfunction bumpStream(){const img=document.querySelector('img.stream');if(!img)return;const mode=state.fastPreview?'fast':'full';img.src=`/stream.mjpg?view=${mode}&t=${Date.now()}`;setToggle('previewFast',mode==='fast');setToggle('previewFull',mode==='full');}\nfunction refresh(){fetch('/api/state').then(r=>r.json()).then(js=>{state=js.settings;document.getElementById('decimate').value=js.settings.decimate;document.getElementById('gamma').value=js.settings.gamma;document.getElementById('emaPos').value=js.settings.emaPos;document.getElementById('emaPose').value=js.settings.emaPose;document.getElementById('exposure').value=js.settings.exposure;document.getElementById('gain').value=js.settings.gain;document.getElementById('brightness').value=js.settings.brightness;document.getElementById('ntServer').value=js.settings.ntServer;setToggle('toggleHigh',js.settings.highSpeed);setToggle('toggleFull',!js.settings.highSpeed);setToggle('toggleNT',js.settings.publishNT);setToggle('toggleUDP',js.settings.udp);setToggle('toggleROI',js.settings.roiOverlay);setToggle('toggleGray',js.settings.grayPreview);setToggle('toggleCLAHE',js.settings.clahe);setToggle('toggleAuto',js.settings.autoExposure);setToggle('toggleDiag',js.settings.diagnostics);state.fastPreview=js.settings.fastPreview;bumpStream();document.getElementById('modePill').innerText=js.mode==='high-speed'?'High-Speed':'Full Quality';document.getElementById('stats').innerText=`${js.fps.toFixed(1)} fps | ${js.proc_ms.toFixed(2)} ms | tags ${js.tags} | blur ${js.blur.toFixed(1)} | ROI ${Math.round(js.roiCoverage*100)}%`;document.getElementById('pose').innerText=js.pose.has?`XYZ ${js.pose.x.toFixed(3)}, ${js.pose.y.toFixed(3)}, ${js.pose.z.toFixed(3)} | RPY ${js.pose.roll.toFixed(1)}, ${js.pose.pitch.toFixed(1)}, ${js.pose.yaw.toFixed(1)}`:'Pose pending';document.getElementById('ipList').innerText='IPs: '+js.ips.map(ip=>`http://${ip}:${DASH_PORT}`).join('  ');});}\nrefresh();setInterval(refresh,650);\nfunction collect(){const p=new URLSearchParams();p.set('decimate',document.getElementById('decimate').value);p.set('gamma',Math.max(0.5,document.getElementById('gamma').value));p.set('emaPos',document.getElementById('emaPos').value);p.set('emaPose',document.getElementById('emaPose').value);p.set('exposure',document.getElementById('exposure').value);p.set('gain',document.getElementById('gain').value);p.set('brightness',document.getElementById('brightness').value);p.set('ntServer',document.getElementById('ntServer').value);p.set('highSpeed',state.highSpeed?'1':'0');p.set('fastPreview',state.fastPreview?'1':'0');p.set('publishNT',state.publishNT?'1':'0');p.set('roiOverlay',state.roiOverlay?'1':'0');p.set('grayPreview',state.grayPreview?'1':'0');p.set('clahe',state.clahe?'1':'0');p.set('udp',state.udp?'1':'0');p.set('diagnostics',state.diagnostics?'1':'0');p.set('autoExposure',state.autoExposure?'1':'0');return p;}\nfunction push(){fetch('/api/settings',{method:'POST',body:collect()}).then(()=>{bumpStream();refresh();});}\nfor(const [id,key] of toggles){const el=document.getElementById(id);if(!el)continue;el.addEventListener('click',()=>{if(key==='highSpeed'){state.highSpeed=true;}else if(key==='fullQuality'){state.highSpeed=false;}else if(key==='fastPreview'){state.fastPreview=true;}else if(key==='fullPreview'){state.fastPreview=false;}else{state[key]=!state[key];}push();setTimeout(refresh,200);});}\ndocument.getElementById('saveBtn').addEventListener('click',()=>{push();});document.getElementById('resetBtn').addEventListener('click',()=>fetch('/api/reset_roi').then(()=>setTimeout(refresh,200)));\n</script>";
+    function setToggle(id,on){ const e=document.getElementById(id); if(!e)return; e.classList.toggle('active',!!on); }
+    function isOn(id){ const e=document.getElementById(id); return e && e.classList.contains('active'); }
 
-    html << "</body></html>";
+    function setModePill(highSpeed){ const pill=document.getElementById('modePill'); pill.textContent=highSpeed?'High-Speed':'Full-Quality'; pill.style.background=highSpeed?'#238636':'#8250df'; }
+
+    function setPreview(mode, force){
+      const changed = streamMode !== mode;
+      streamMode = mode;
+      setToggle('previewFast',mode==='fast');
+      setToggle('previewFull',mode==='full');
+      if (changed || force) {
+        document.getElementById('stream').src = `/stream.mjpg?view=${mode}&ts=${Date.now()}`;
+      }
+    }
+
+    function updateFromState(s){
+      document.getElementById('decimate').value = s.settings.decimate;
+      document.getElementById('gamma').value = s.settings.gamma;
+      document.getElementById('emaPos').value = s.settings.emaPos;
+      document.getElementById('emaPose').value = s.settings.emaPose;
+      document.getElementById('exposure').value = s.settings.exposure;
+      document.getElementById('gain').value = s.settings.gain;
+      document.getElementById('brightness').value = s.settings.brightness;
+      document.getElementById('ntServer').value = s.settings.ntServer;
+
+      setToggle('toggleHigh', s.settings.highSpeed);
+      setToggle('toggleFull', !s.settings.highSpeed);
+      setPreview(s.settings.fastPreview ? 'fast' : 'full');
+      setToggle('toggleNT', s.settings.publishNT);
+      setToggle('toggleUDP', s.settings.udp);
+      setToggle('toggleROI', s.settings.roiOverlay);
+      setToggle('toggleGray', s.settings.grayPreview);
+      setToggle('toggleCLAHE', s.settings.clahe);
+      setToggle('toggleAuto', s.settings.autoExposure);
+      setToggle('toggleDiag', s.settings.diagnostics);
+
+      setModePill(s.settings.highSpeed);
+      const statsText = `${s.fps.toFixed(1)} fps | proc ${s.proc_ms.toFixed(1)} ms | tags ${s.tags} | blur ${s.blur.toFixed(0)} | roi ${(s.roiCoverage*100).toFixed(1)}%`;
+      document.getElementById('stats').innerText = statsText;
+      let pose = 'pose: none';
+      if (s.pose.has) {
+        pose = `XYZ ${s.pose.x.toFixed(3)}, ${s.pose.y.toFixed(3)}, ${s.pose.z.toFixed(3)} | RPY ${s.pose.roll.toFixed(1)}, ${s.pose.pitch.toFixed(1)}, ${s.pose.yaw.toFixed(1)}`;
+      }
+      document.getElementById('pose').innerText = pose;
+      const ips = s.ips || [];
+      document.getElementById('ipList').innerText = ips.length ? `IPs: ${ips.join(' | ')}` : 'IP: localhost';
+    }
+
+    async function refreshState(){
+      try {
+        const res = await fetch('/api/state');
+        if (res.ok) updateFromState(await res.json());
+      } catch(err) { console.warn('state poll failed', err); }
+    }
+
+    async function sendSettings(overrides={}){
+      const p = new URLSearchParams();
+      p.append('decimate', document.getElementById('decimate').value);
+      p.append('gamma', document.getElementById('gamma').value);
+      p.append('emaPos', document.getElementById('emaPos').value);
+      p.append('emaPose', document.getElementById('emaPose').value);
+      p.append('exposure', document.getElementById('exposure').value);
+      p.append('gain', document.getElementById('gain').value);
+      p.append('brightness', document.getElementById('brightness').value);
+      p.append('ntServer', document.getElementById('ntServer').value);
+
+      const highSpeed = overrides.hasOwnProperty('highSpeed') ? overrides.highSpeed : isOn('toggleHigh');
+      if (highSpeed) p.append('highSpeed', 'on'); else p.append('fullQuality', 'on');
+      p.append('fastPreview', streamMode === 'fast' ? 'on' : '');
+
+      if (isOn('toggleNT')) p.append('publishNT','on');
+      if (isOn('toggleUDP')) p.append('udp','on');
+      if (isOn('toggleROI')) p.append('roiOverlay','on');
+      if (isOn('toggleGray')) p.append('grayPreview','on');
+      if (isOn('toggleCLAHE')) p.append('clahe','on');
+      if (isOn('toggleAuto')) p.append('autoExposure','on');
+      if (isOn('toggleDiag')) p.append('diagnostics','on');
+
+      await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:p });
+      setTimeout(refreshState, 120);
+    }
+
+    function wire(){
+      document.getElementById('toggleHigh').onclick = ()=>{ setToggle('toggleHigh',true); setToggle('toggleFull',false); sendSettings({highSpeed:true}); };
+      document.getElementById('toggleFull').onclick = ()=>{ setToggle('toggleHigh',false); setToggle('toggleFull',true); sendSettings({highSpeed:false}); };
+      document.getElementById('previewFast').onclick = ()=> { setPreview('fast', true); sendSettings(); };
+      document.getElementById('previewFull').onclick = ()=> { setPreview('full', true); sendSettings(); };
+      document.getElementById('toggleNT').onclick = ()=> { setToggle('toggleNT', !isOn('toggleNT')); sendSettings(); };
+      document.getElementById('toggleUDP').onclick = ()=> { setToggle('toggleUDP', !isOn('toggleUDP')); sendSettings(); };
+      document.getElementById('toggleROI').onclick = ()=> { setToggle('toggleROI', !isOn('toggleROI')); sendSettings(); };
+      document.getElementById('toggleGray').onclick = ()=> { setToggle('toggleGray', !isOn('toggleGray')); sendSettings(); };
+      document.getElementById('toggleCLAHE').onclick = ()=> { setToggle('toggleCLAHE', !isOn('toggleCLAHE')); sendSettings(); };
+      document.getElementById('toggleAuto').onclick = ()=> { setToggle('toggleAuto', !isOn('toggleAuto')); sendSettings(); };
+      document.getElementById('toggleDiag').onclick = ()=> { setToggle('toggleDiag', !isOn('toggleDiag')); sendSettings(); };
+      document.getElementById('saveBtn').onclick = ()=> sendSettings();
+      document.getElementById('resetBtn').onclick = ()=> { fetch('/api/reset_roi').then(()=>refreshState()); };
+
+      refreshState();
+      setInterval(refreshState, 700);
+    }
+
+    document.addEventListener('DOMContentLoaded', wire);
+  </script>
+</body>
+</html>)";
     return html.str();
 }
+
 
 std::atomic<bool> gQuit{false};
 

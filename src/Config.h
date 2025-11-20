@@ -19,8 +19,8 @@ inline constexpr double DEFAULT_TAG_SIZE_M = 0.1524;
 inline constexpr int CAM_IDX = 0;
 // Capture profiles
 inline constexpr int FAST_CAPTURE_FPS = 120;
-inline constexpr int FAST_CAPTURE_WIDTH = 640;
-inline constexpr int FAST_CAPTURE_HEIGHT = 360;
+inline constexpr int FAST_CAPTURE_WIDTH = 424;
+inline constexpr int FAST_CAPTURE_HEIGHT = 240;
 
 inline constexpr int FULL_CAPTURE_FPS = 60;
 inline constexpr int FULL_CAPTURE_WIDTH = 1280;
@@ -45,15 +45,15 @@ inline constexpr int CAMERA_CONTROL_POLL_MS = 250;
 inline constexpr const char* WEB_BIND_ADDRESS = "0.0.0.0"; // bind all so Pi is discoverable
 inline constexpr int WEB_PORT = 5805;
 inline constexpr const char* WEB_DASHBOARD_TITLE = "April Vision";
-inline constexpr int MJPEG_STREAM_FPS = 24;
-inline constexpr double STREAM_FAST_SCALE = 0.55;
+inline constexpr int MJPEG_STREAM_FPS = 30;
+inline constexpr double STREAM_FAST_SCALE = 0.6;
 
 inline constexpr bool DEFAULT_HIGH_SPEED_MODE = true;
 inline constexpr int HIGH_SPEED_WIDTH = 320;
 inline constexpr int HIGH_SPEED_HEIGHT = 240;
-inline constexpr double HIGH_SPEED_ROI_INFLATION = 1.5;
-inline constexpr int HIGH_SPEED_ROI_PERSISTENCE = 6;
-inline constexpr int HIGH_SPEED_MIN_ROI_EDGE = 32;
+inline constexpr double HIGH_SPEED_ROI_INFLATION = 1.8;
+inline constexpr int HIGH_SPEED_ROI_PERSISTENCE = 4;
+inline constexpr int HIGH_SPEED_MIN_ROI_EDGE = 28;
 inline constexpr double HIGH_SPEED_ACCURACY_BONUS = 0.12; // refine pose smoothing for HS mode
 
 // Performance tuning

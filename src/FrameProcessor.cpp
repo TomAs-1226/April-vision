@@ -133,12 +133,16 @@ void FrameProcessor::setGamma(double gamma) {
 }
 
 void FrameProcessor::setHighSpeedMode(bool enabled) {
-    if (highSpeedMode_ == enabled) return;
+    if (highSpeedMode_ == enabled) {
+        detector_->setRefineEdges(!highSpeedMode_);
+        return;
+    }
     highSpeedMode_ = enabled;
     if (!highSpeedMode_) {
         activeRoi_ = cv::Rect();
         roiHoldFrames_ = 0;
     }
+    detector_->setRefineEdges(!highSpeedMode_);
 }
 
 void FrameProcessor::configureHighSpeed(const HighSpeedConfig& cfg) {
@@ -336,7 +340,10 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
     if (!detectView.isContinuous()) detectView = detectView.clone();
 
     const double blurVar = computeBlurVariance(detectView);
-    const int decimate = chooseDecimate(baseDecimate_, blurVar);
+    int decimate = chooseDecimate(baseDecimate_, blurVar);
+    if (highSpeedMode_) {
+        decimate = std::max(decimate, 2);
+    }
     detector_->setDecimate(static_cast<float>(decimate));
 
     std::vector<Detection> filtered;
