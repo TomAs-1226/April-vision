@@ -949,8 +949,14 @@ void FrameProcessor::drawDetection(cv::Mat& vis, const Detection& det,
     if (poseValid && !cameraMatrix_.empty() && cameraMatrix_.total() > 0) {
         const cv::Vec3d& axisR = (cv::norm(rawRvec) > 0.0) ? rawRvec : rvec;
         const cv::Vec3d& axisT = (cv::norm(rawTvec) > 0.0) ? rawTvec : tvec;
-        cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, axisR, axisT,
-                          static_cast<float>(tagSizeM_), 2);
+
+        try {
+            cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, axisR, axisT,
+                              static_cast<float>(tagSizeM_), 2);
+        } catch (...) {
+            // Fall through to surface axes if standard axes rendering fails.
+        }
+
         drawSurfaceAxes(vis, axisR, axisT);
     }
 }
@@ -976,10 +982,28 @@ void FrameProcessor::drawSurfaceAxes(cv::Mat& vis, const cv::Vec3d& rvec, const 
 
     if (proj.size() != axesPts.size()) return;
 
-    const cv::Point origin = proj[0];
-    cv::line(vis, origin, proj[1], cv::Scalar(0, 0, 255), 2, cv::LINE_AA);   // X (red)
-    cv::line(vis, origin, proj[2], cv::Scalar(0, 255, 0), 2, cv::LINE_AA);   // Y (green)
-    cv::line(vis, origin, proj[3], cv::Scalar(255, 0, 0), 2, cv::LINE_AA);   // Z (blue)
+    const auto toPoint = [](const cv::Point2f& p) {
+        return cv::Point(cvRound(p.x), cvRound(p.y));
+    };
+
+    auto stretchedTip = [](const cv::Point2f& origin, const cv::Point2f& tip) {
+        cv::Point2f dir = tip - origin;
+        const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+        constexpr float kMinPx = 8.0f; // ensure visibility even when nearly face-on
+        if (len > 1e-3f && len < kMinPx) {
+            dir *= (kMinPx / len);
+        }
+        return origin + dir;
+    };
+
+    const cv::Point2f origin = proj[0];
+    const cv::Point2f xTip = stretchedTip(origin, proj[1]);
+    const cv::Point2f yTip = stretchedTip(origin, proj[2]);
+    const cv::Point2f zTip = stretchedTip(origin, proj[3]);
+
+    cv::line(vis, toPoint(origin), toPoint(xTip), cv::Scalar(0, 0, 255), 2, cv::LINE_AA);   // X (red)
+    cv::line(vis, toPoint(origin), toPoint(yTip), cv::Scalar(0, 255, 0), 2, cv::LINE_AA);   // Y (green)
+    cv::line(vis, toPoint(origin), toPoint(zTip), cv::Scalar(255, 0, 0), 2, cv::LINE_AA);   // Z (blue)
 }
 
 void FrameProcessor::drawPrediction(cv::Mat& vis, int id, double cx, double cy, double s, bool isOpticalFlow) {
