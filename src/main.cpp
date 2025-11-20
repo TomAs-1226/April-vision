@@ -309,6 +309,7 @@ void VisionApp::applySettings(const SettingsSnapshot& updated) {
     publishNT_.store(updated.publishNT ? 1 : 0);
     const bool prevHighSpeed = highSpeed_.load() > 0;
     highSpeed_.store(updated.highSpeed ? 1 : 0);
+    const bool restartNeeded = running_ && (prevHighSpeed != updated.highSpeed);
     roiOverlay_.store(updated.roiOverlay ? 1 : 0);
     grayPreview_.store(updated.grayPreview ? 1 : 0);
     diagnostics_.store(updated.diagnostics ? 1 : 0);
@@ -324,7 +325,9 @@ void VisionApp::applySettings(const SettingsSnapshot& updated) {
     publisher_->enableNetworkTables(updated.publishNT);
     publisher_->enableUDP(updated.udp);
     publisher_->setNtServer(ntServer_);
-    if (running_ && prevHighSpeed != updated.highSpeed) {
+
+    if (restartNeeded) {
+        processor_->resetTracking();
         restartCameraForMode();
     }
 }
@@ -946,16 +949,16 @@ std::string WebDashboard::dashboardHtml() {
       p.append('ntServer', document.getElementById('ntServer').value);
 
       const highSpeed = overrides.hasOwnProperty('highSpeed') ? overrides.highSpeed : isOn('toggleHigh');
-      if (highSpeed) p.append('highSpeed', 'on'); else p.append('fullQuality', 'on');
-      p.append('fastPreview', streamMode === 'fast' ? 'on' : '');
+      p.append('highSpeed', highSpeed ? '1' : '0');
+      p.append('fastPreview', streamMode === 'fast' ? '1' : '0');
 
-      if (isOn('toggleNT')) p.append('publishNT','on');
-      if (isOn('toggleUDP')) p.append('udp','on');
-      if (isOn('toggleROI')) p.append('roiOverlay','on');
-      if (isOn('toggleGray')) p.append('grayPreview','on');
-      if (isOn('toggleCLAHE')) p.append('clahe','on');
-      if (isOn('toggleAuto')) p.append('autoExposure','on');
-      if (isOn('toggleDiag')) p.append('diagnostics','on');
+      p.append('publishNT', isOn('toggleNT') ? '1' : '0');
+      p.append('udp', isOn('toggleUDP') ? '1' : '0');
+      p.append('roiOverlay', isOn('toggleROI') ? '1' : '0');
+      p.append('grayPreview', isOn('toggleGray') ? '1' : '0');
+      p.append('clahe', isOn('toggleCLAHE') ? '1' : '0');
+      p.append('autoExposure', isOn('toggleAuto') ? '1' : '0');
+      p.append('diagnostics', isOn('toggleDiag') ? '1' : '0');
 
       await fetch('/api/settings', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:p });
       setTimeout(refreshState, 120);

@@ -115,6 +115,19 @@ FrameProcessor::FrameProcessor()
 
 FrameProcessor::~FrameProcessor() = default;
 
+void FrameProcessor::resetTracking() {
+    trackers_.clear();
+    posSmoothers_.clear();
+    poseSmoothers_.clear();
+    poseMedians_.clear();
+    lastCorners_.clear();
+    lkLastPts_.clear();
+    prevGray_.release();
+    activeRoi_ = cv::Rect();
+    roiHoldFrames_ = 0;
+    sceneHasUnseen_ = false;
+}
+
 void FrameProcessor::setCameraMatrix(const cv::Mat& K, const cv::Mat& D) {
     K.copyTo(cameraMatrix_);
     D.copyTo(distCoeffs_);
@@ -142,6 +155,7 @@ void FrameProcessor::setHighSpeedMode(bool enabled) {
         activeRoi_ = cv::Rect();
         roiHoldFrames_ = 0;
     }
+    resetTracking();
     detector_->setRefineEdges(!highSpeedMode_);
 }
 
@@ -273,6 +287,11 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
 
     const int h = frame.rows;
     const int w = frame.cols;
+
+    if (lastFrameSize_ != frame.size()) {
+        resetTracking();
+        lastFrameSize_ = frame.size();
+    }
 
     // Initialize camera matrix if needed
     if (cameraMatrix_.empty()) {

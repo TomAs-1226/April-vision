@@ -58,6 +58,7 @@ public:
     void setHighSpeedMode(bool enabled);
     void configureHighSpeed(const HighSpeedConfig& cfg);
     bool isHighSpeedMode() const { return highSpeedMode_; }
+    void resetTracking();
 
     // Network publishing
     void setNetworkPublisher(std::shared_ptr<NetworkPublisher> pub) { publisher_ = pub; }
@@ -121,6 +122,8 @@ private:
     std::map<int, std::unique_ptr<EMASmoother>> poseSmoothers_;
     std::map<int, std::unique_ptr<MedianBuffer>> poseMedians_;
     std::map<int, std::vector<cv::Point2f>> lastCorners_;
+
+    cv::Size lastFrameSize_;
 
     // Optical flow
     cv::Mat prevGray_;
