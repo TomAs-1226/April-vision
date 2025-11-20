@@ -32,12 +32,19 @@ inline constexpr double CAMERA_BRIGHTNESS_MAX = 255.0;
 inline constexpr double CAMERA_PROP_SLIDER_SCALE = 100.0;
 inline constexpr int CAMERA_CONTROL_POLL_MS = 250;
 
+// Web UI / dashboard
+inline constexpr const char* WEB_BIND_ADDRESS = "0.0.0.0"; // bind all so Pi is discoverable
+inline constexpr int WEB_PORT = 5805;
+inline constexpr const char* WEB_DASHBOARD_TITLE = "April Vision";
+inline constexpr int MJPEG_STREAM_FPS = 30;
+
 inline constexpr bool DEFAULT_HIGH_SPEED_MODE = true;
 inline constexpr int HIGH_SPEED_WIDTH = 424;
 inline constexpr int HIGH_SPEED_HEIGHT = 240;
 inline constexpr double HIGH_SPEED_ROI_INFLATION = 1.5;
 inline constexpr int HIGH_SPEED_ROI_PERSISTENCE = 6;
 inline constexpr int HIGH_SPEED_MIN_ROI_EDGE = 32;
+inline constexpr double HIGH_SPEED_ACCURACY_BONUS = 0.12; // refine pose smoothing for HS mode
 
 // Performance tuning
 inline constexpr int DETECTION_RATE_HZ = 60;

@@ -7,6 +7,10 @@
 #include <fcntl.h>
 #endif
 
+#ifdef APRILV_HAS_NTCORE
+#include <networktables/NetworkTableInstance.h>
+#endif
+
 NetworkPublisher::NetworkPublisher(const std::string& ntServer,
                                  const std::string& udpIp,
                                  int udpPort)
@@ -38,6 +42,12 @@ NetworkPublisher::~NetworkPublisher() {
         close(udpSocket_);
 #endif
     }
+
+#ifdef APRILV_HAS_NTCORE
+    if (connectionListener_) {
+        ntInstance_.RemoveConnectionListener(*connectionListener_);
+    }
+#endif
 }
 
 void NetworkPublisher::start() {
@@ -170,15 +180,85 @@ void NetworkPublisher::publishLoop() {
                 sendUDP(jsonStr);
             }
 
-            // TODO: NetworkTables publishing
-            // This requires linking against ntcore library
-            // For now, UDP fallback is implemented
             if (ntEnabled_) {
-                // Would publish to NetworkTables here
-                // nt::NetworkTableInstance::GetDefault()...
+                publishNetworkTables(payload);
             }
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(4));
     }
+}
+
+void NetworkPublisher::ensureNetworkTables() {
+#ifdef APRILV_HAS_NTCORE
+    if (ntReady_) return;
+    if (connectionListener_) {
+        ntInstance_.RemoveConnectionListener(*connectionListener_);
+        connectionListener_.reset();
+    }
+    ntInstance_.StopClient();
+    ntInstance_ = nt::NetworkTableInstance::Create();
+    ntInstance_.StartClient(ntServer_.c_str(), 5810);
+    table_ = ntInstance_.GetTable("vision");
+    connectionListener_ = ntInstance_.AddConnectionListener(
+        [this](const nt::Event& event) {
+            if (event.Is(nt::EventFlags::kConnected)) {
+                std::cout << "[NetworkTables] Connected to " << ntServer_ << std::endl;
+            } else if (event.Is(nt::EventFlags::kDisconnected)) {
+                std::cout << "[NetworkTables] Disconnected from server" << std::endl;
+            }
+        });
+    ntReady_ = true;
+#else
+    static bool warned = false;
+    if (!warned) {
+        std::cout << "[NetworkPublisher] NetworkTables support not built; UDP only" << std::endl;
+        warned = true;
+    }
+#endif
+}
+
+void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
+#ifdef APRILV_HAS_NTCORE
+    ensureNetworkTables();
+    if (!ntReady_ || !table_) return;
+
+    table_->GetEntry("timestamp").SetDouble(payload.timestamp);
+    table_->GetEntry("tag_count").SetDouble(static_cast<double>(payload.tags.size()));
+
+    std::vector<double> ids, txs, tys, tas, reproj;
+    std::vector<double> tvecs, rvecs;
+    ids.reserve(payload.tags.size());
+    txs.reserve(payload.tags.size());
+    tys.reserve(payload.tags.size());
+    tas.reserve(payload.tags.size());
+    reproj.reserve(payload.tags.size());
+    tvecs.reserve(payload.tags.size() * 3);
+    rvecs.reserve(payload.tags.size() * 3);
+
+    for (const auto& tag : payload.tags) {
+        ids.push_back(tag.id);
+        txs.push_back(tag.tx_deg);
+        tys.push_back(tag.ty_deg);
+        tas.push_back(tag.ta_percent);
+        reproj.push_back(tag.reprojError);
+        tvecs.push_back(tag.tvec[0]);
+        tvecs.push_back(tag.tvec[1]);
+        tvecs.push_back(tag.tvec[2]);
+        rvecs.push_back(tag.rvec[0]);
+        rvecs.push_back(tag.rvec[1]);
+        rvecs.push_back(tag.rvec[2]);
+    }
+
+    table_->GetEntry("ids").SetDoubleArray(ids);
+    table_->GetEntry("tx_deg").SetDoubleArray(txs);
+    table_->GetEntry("ty_deg").SetDoubleArray(tys);
+    table_->GetEntry("ta_percent").SetDoubleArray(tas);
+    table_->GetEntry("reproj_error").SetDoubleArray(reproj);
+    table_->GetEntry("tvec").SetDoubleArray(tvecs);
+    table_->GetEntry("rvec").SetDoubleArray(rvecs);
+#else
+    (void)payload;
+    ensureNetworkTables();
+#endif
 }

@@ -133,7 +133,8 @@ endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
         ${OpenCV_INCLUDE_DIRS}
-        ${EIGEN3_INCLUDE_DIR})
+        ${EIGEN3_INCLUDE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
 if(NOT APRILTAG_BUNDLED)
     target_include_directories(${PROJECT_NAME} PRIVATE ${APRILTAG_INCLUDE_DIR})
@@ -151,6 +152,18 @@ target_link_libraries(${PROJECT_NAME}
         Eigen3::Eigen
         ${_apriltag_link_target}
 )
+
+option(ENABLE_NETWORKTABLES "Enable NetworkTables publishing via ntcore" ON)
+if(ENABLE_NETWORKTABLES)
+    find_package(ntcore QUIET)
+    if(ntcore_FOUND)
+        message(STATUS "ntcore found: enabling NetworkTables output")
+        target_link_libraries(${PROJECT_NAME} ntcore)
+        target_compile_definitions(${PROJECT_NAME} PRIVATE APRILV_HAS_NTCORE)
+    else()
+        message(STATUS "ntcore not found; NetworkTables output will fall back to UDP")
+    endif()
+endif()
 
 if(UNIX AND NOT APPLE)
     set_target_properties(${PROJECT_NAME} PROPERTIES BUILD_RPATH "$ORIGIN")
