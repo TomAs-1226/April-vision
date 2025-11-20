@@ -122,6 +122,8 @@ void FrameProcessor::resetTracking() {
     poseMedians_.clear();
     lastCorners_.clear();
     lkLastPts_.clear();
+    stableRvecs_.clear();
+    stableTvecs_.clear();
     prevGray_.release();
     activeRoi_ = cv::Rect();
     roiHoldFrames_ = 0;
@@ -241,6 +243,39 @@ cv::Vec3d FrameProcessor::rvecToEuler(const cv::Vec3d& rvec) const {
     return {roll * rad2deg, pitch * rad2deg, yaw * rad2deg};
 }
 
+cv::Vec3d FrameProcessor::stabilizeRvec(int id, const cv::Vec3d& candidate) {
+    auto it = stableRvecs_.find(id);
+    if (it == stableRvecs_.end()) {
+        stableRvecs_[id] = candidate;
+        return candidate;
+    }
+
+    const cv::Vec3d& last = it->second;
+    const cv::Vec3d flipped = -candidate;
+    const double dDirect = cv::norm(candidate - last);
+    const double dFlip = cv::norm(flipped - last);
+    cv::Vec3d chosen = (dFlip < dDirect) ? flipped : candidate;
+
+    const double alpha = 0.35; // heavier smoothing for axis stability
+    cv::Vec3d blended = alpha * chosen + (1.0 - alpha) * last;
+    stableRvecs_[id] = blended;
+    return blended;
+}
+
+cv::Vec3d FrameProcessor::stabilizeTvec(int id, const cv::Vec3d& candidate) {
+    auto it = stableTvecs_.find(id);
+    if (it == stableTvecs_.end()) {
+        stableTvecs_[id] = candidate;
+        return candidate;
+    }
+
+    const cv::Vec3d& last = it->second;
+    const double alpha = 0.30;
+    cv::Vec3d blended = alpha * candidate + (1.0 - alpha) * last;
+    stableTvecs_[id] = blended;
+    return blended;
+}
+
 cv::Mat FrameProcessor::preprocessImage(const cv::Mat& gray) {
     if (preprocessBuf_.empty() || preprocessBuf_.size() != gray.size()) {
         preprocessBuf_.create(gray.size(), gray.type());
@@ -322,6 +357,13 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         fpsWindowStart_ = now;
     }
 
+    const double targetMs = 1000.0 / 60.0; // aim for >=60fps processing
+    double recentAvgMs = 0.0;
+    if (!processTimeHist_.empty()) {
+        for (double t : processTimeHist_) recentAvgMs += t;
+        recentAvgMs /= processTimeHist_.size();
+    }
+
     cv::Mat working = grayFull;
     double scaleX = 1.0;
     double scaleY = 1.0;
@@ -339,6 +381,22 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
             scaleY = static_cast<double>(grayFull.rows) / highSpeedConfig_.forcedSize.height;
         }
     } else {
+        const double needScale = (recentAvgMs > targetMs)
+            ? std::clamp(std::sqrt(targetMs / recentAvgMs), 0.65, 1.0)
+            : 1.0;
+        if (needScale < 0.999) {
+            cv::Size scaledSize(
+                std::max(1, static_cast<int>(grayFull.cols * needScale)),
+                std::max(1, static_cast<int>(grayFull.rows * needScale)));
+            if (resizedGray_.size() != scaledSize) {
+                resizedGray_.create(scaledSize, CV_8UC1);
+            }
+            cv::resize(grayFull, resizedGray_, scaledSize, 0, 0, cv::INTER_AREA);
+            working = resizedGray_;
+            scaleX = static_cast<double>(grayFull.cols) / scaledSize.width;
+            scaleY = static_cast<double>(grayFull.rows) / scaledSize.height;
+        }
+
         activeRoi_ = cv::Rect();
         roiHoldFrames_ = 0;
     }
@@ -360,15 +418,8 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
     cv::Mat detectView = grayProc(roiRect);
     if (!detectView.isContinuous()) detectView = detectView.clone();
 
-    double recentAvgMs = 0.0;
-    if (!processTimeHist_.empty()) {
-        for (double t : processTimeHist_) recentAvgMs += t;
-        recentAvgMs /= processTimeHist_.size();
-    }
-
     const double blurVar = computeBlurVariance(detectView);
     int decimate = chooseDecimate(baseDecimate_, blurVar);
-    const double targetMs = 1000.0 / 60.0; // aim for >=60fps processing
     if (recentAvgMs > targetMs * 1.5) {
         decimate = std::max(decimate, config::HIGH_SPEED_MIN_DECIMATE + 2);
     } else if (recentAvgMs > targetMs * 1.15) {
@@ -380,20 +431,30 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
     detector_->setDecimate(static_cast<float>(decimate));
 
     std::vector<Detection> filtered;
+    std::vector<std::vector<cv::Point2f>> roiCornersList;
     auto detections = detector_->detect(detectView);
     filtered.reserve(detections.size());
+    roiCornersList.reserve(detections.size());
     for (const auto& det : detections) {
         if (!shouldProcessTag(det.id)) continue;
-        Detection adjusted = det;
-        auto corners = PoseEstimator::orderCorners(det.corners);
-        for (auto& pt : corners) {
+        auto roiCorners = PoseEstimator::orderCorners(det.corners);
+        for (auto& pt : roiCorners) {
             pt.x += roiRect.x;
             pt.y += roiRect.y;
-            pt.x *= scaleX;
-            pt.y *= scaleY;
         }
-        adjusted.corners = corners;
+
+        std::vector<cv::Point2f> fullCorners = roiCorners;
+        if (std::abs(scaleX - 1.0) > 1e-3 || std::abs(scaleY - 1.0) > 1e-3) {
+            for (auto& pt : fullCorners) {
+                pt.x = static_cast<float>(pt.x * scaleX);
+                pt.y = static_cast<float>(pt.y * scaleY);
+            }
+        }
+
+        Detection adjusted = det;
+        adjusted.corners = fullCorners;
         filtered.push_back(std::move(adjusted));
+        roiCornersList.push_back(std::move(roiCorners));
     }
 
     if (highSpeedMode_) {
@@ -415,10 +476,9 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
     std::set<int> visibleIds;
     std::vector<TagData> tagDataList;
 
-    const double invScaleX = (scaleX != 0.0) ? (1.0 / scaleX) : 1.0;
-    const double invScaleY = (scaleY != 0.0) ? (1.0 / scaleY) : 1.0;
-
-    for (auto& det : filtered) {
+    for (size_t i = 0; i < filtered.size(); ++i) {
+        auto& det = filtered[i];
+        const auto& roiCorners = roiCornersList[i];
         visibleIds.insert(det.id);
         std::vector<cv::Point2f> corners = PoseEstimator::orderCorners(det.corners);
         const double area = PoseEstimator::polygonArea(corners);
@@ -432,12 +492,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         }
 
         if (highSpeedMode_) {
-            std::vector<cv::Point2f> detSpace = corners;
-            for (auto& pt : detSpace) {
-                pt.x = static_cast<float>(pt.x * invScaleX);
-                pt.y = static_cast<float>(pt.y * invScaleY);
-            }
-            cv::Rect detBox = cv::boundingRect(detSpace);
+            cv::Rect detBox = cv::boundingRect(roiCorners);
             if (detBox.area() > 0) {
                 detBox = clampRectToImage(detBox, grayProc.cols, grayProc.rows);
                 cv::Rect grown = growRect(detBox, highSpeedConfig_.roiInflation, grayProc.cols, grayProc.rows, highSpeedConfig_.minEdge);
@@ -582,12 +637,15 @@ bool FrameProcessor::computePoseForCorners(int id, const std::vector<cv::Point2f
     cv::Vec3d rawR(poseResult->rvec[0], poseResult->rvec[1], poseResult->rvec[2]);
     reprojErr = poseResult->reprojError;
 
-    if (rawTvecOut) *rawTvecOut = rawT;
-    if (rawRvecOut) *rawRvecOut = rawR;
+    cv::Vec3d stableRawT = stabilizeTvec(id, rawT);
+    cv::Vec3d stableRawR = stabilizeRvec(id, rawR);
+
+    if (rawTvecOut) *rawTvecOut = stableRawT;
+    if (rawRvecOut) *rawRvecOut = stableRawR;
 
     if (!smooth) {
-        tvec = rawT;
-        rvec = rawR;
+        tvec = stableRawT;
+        rvec = stableRawR;
         return true;
     }
 
@@ -619,6 +677,9 @@ bool FrameProcessor::computePoseForCorners(int id, const std::vector<cv::Point2f
         tvec = cv::Vec3d(sPos(0), sPos(1), sPos(2));
         rvec = cv::Vec3d(sRot(0), sRot(1), sRot(2));
     }
+
+    tvec = stabilizeTvec(id, tvec);
+    rvec = stabilizeRvec(id, rvec);
 
     return true;
 }
@@ -819,6 +880,8 @@ void FrameProcessor::purgeOldTrackers(const std::set<int>& visibleIds) {
         poseMedians_.erase(id);
         lastCorners_.erase(id);
         lkLastPts_.erase(id);
+        stableRvecs_.erase(id);
+        stableTvecs_.erase(id);
     }
 }
 

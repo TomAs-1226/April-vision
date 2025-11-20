@@ -94,6 +94,9 @@ private:
                                std::vector<cv::Point2f>& out);
     void purgeOldTrackers(const std::set<int>& visibleIds);
 
+    cv::Vec3d stabilizeRvec(int id, const cv::Vec3d& candidate);
+    cv::Vec3d stabilizeTvec(int id, const cv::Vec3d& candidate);
+
     // Visualization
     void drawDetection(cv::Mat& vis, const Detection& det,
                       const std::vector<cv::Point2f>& corners,
@@ -131,6 +134,8 @@ private:
     std::map<int, std::unique_ptr<EMASmoother>> poseSmoothers_;
     std::map<int, std::unique_ptr<MedianBuffer>> poseMedians_;
     std::map<int, std::vector<cv::Point2f>> lastCorners_;
+    std::map<int, cv::Vec3d> stableRvecs_;
+    std::map<int, cv::Vec3d> stableTvecs_;
 
     cv::Size lastFrameSize_;
 

@@ -31,6 +31,15 @@ NetworkPublisher::NetworkPublisher(const std::string& ntServer,
 #endif
 }
 
+void NetworkPublisher::setNtServer(const std::string& server) {
+    std::lock_guard<std::mutex> lock(ntMutex_);
+    if (server.empty() || ntServer_ == server) return;
+    ntServer_ = server;
+#ifdef APRILV_HAS_NTCORE
+    ntReady_ = false;
+#endif
+}
+
 NetworkPublisher::~NetworkPublisher() {
     stop();
 
@@ -191,14 +200,20 @@ void NetworkPublisher::publishLoop() {
 
 void NetworkPublisher::ensureNetworkTables() {
 #ifdef APRILV_HAS_NTCORE
-    if (ntReady_) return;
+    std::string serverCopy;
+    {
+        std::lock_guard<std::mutex> lock(ntMutex_);
+        if (ntReady_) return;
+        serverCopy = ntServer_;
+    }
+
     if (connectionListener_) {
         ntInstance_.RemoveConnectionListener(*connectionListener_);
         connectionListener_.reset();
     }
     ntInstance_.StopClient();
     ntInstance_ = nt::NetworkTableInstance::Create();
-    ntInstance_.StartClient(ntServer_.c_str(), 5810);
+    ntInstance_.StartClient(serverCopy.c_str(), 5810);
     table_ = ntInstance_.GetTable("vision");
     connectionListener_ = ntInstance_.AddConnectionListener(
         [this](const nt::Event& event) {
@@ -208,6 +223,7 @@ void NetworkPublisher::ensureNetworkTables() {
                 std::cout << "[NetworkTables] Disconnected from server" << std::endl;
             }
         });
+    std::lock_guard<std::mutex> lock(ntMutex_);
     ntReady_ = true;
 #else
     static bool warned = false;
@@ -221,7 +237,10 @@ void NetworkPublisher::ensureNetworkTables() {
 void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
 #ifdef APRILV_HAS_NTCORE
     ensureNetworkTables();
-    if (!ntReady_ || !table_) return;
+    {
+        std::lock_guard<std::mutex> lock(ntMutex_);
+        if (!ntReady_ || !table_) return;
+    }
 
     table_->GetEntry("timestamp").SetDouble(payload.timestamp);
     table_->GetEntry("tag_count").SetDouble(static_cast<double>(payload.tags.size()));

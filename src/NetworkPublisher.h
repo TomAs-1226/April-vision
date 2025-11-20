@@ -52,13 +52,7 @@ public:
     void stop();
     void publish(const VisionPayload& payload);
 
-    void setNtServer(const std::string& server) {
-        if (ntServer_ == server) return;
-        ntServer_ = server;
-#ifdef APRILV_HAS_NTCORE
-        ntReady_ = false;
-#endif
-    }
+    void setNtServer(const std::string& server);
     std::string ntServer() const { return ntServer_; }
 
     void enableNetworkTables(bool enable) { ntEnabled_ = enable; }
@@ -85,6 +79,8 @@ private:
     std::thread publishThread_;
     std::mutex queueMutex_;
     std::deque<VisionPayload> queue_;
+
+    mutable std::mutex ntMutex_;
 
     // UDP socket
     int udpSocket_;
