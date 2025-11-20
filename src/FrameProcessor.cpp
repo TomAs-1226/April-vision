@@ -411,7 +411,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
         std::vector<cv::Point2f> corners = PoseEstimator::orderCorners(det.corners);
         const double area = PoseEstimator::polygonArea(corners);
 
-        if (area > 30.0) {
+        if (!highSpeedMode_ && area > 30.0) {
             const cv::Size subWin(config::CORNER_SUBPIX_WIN, config::CORNER_SUBPIX_WIN);
             const int margin = std::max(subWin.width, subWin.height) / 2;
             if (!anyCornerNearBorder(corners, grayFull.cols, grayFull.rows, margin)) {
@@ -445,10 +445,11 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
                                               tx_deg, ty_deg, ta_percent);
 
         cv::Vec3d tvec(0, 0, 0), rvec(0, 0, 0);
+        cv::Vec3d rawT(0, 0, 0), rawR(0, 0, 0);
         double reprojErr = 0.0;
 
         if (cv::norm(corners[0] - corners[2]) >= 14.0 &&
-            computePoseForCorners(det.id, corners, tvec, rvec, reprojErr)) {
+            computePoseForCorners(det.id, corners, tvec, rvec, reprojErr, true, &rawT, &rawR)) {
             TagData td;
             td.id = det.id;
             td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta_percent;
@@ -464,7 +465,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
             stats.poseEuler = rvecToEuler(rvec);
         }
 
-        drawDetection(vis, det, corners, tx_deg, ty_deg, ta_percent, tvec, rvec, poseValid);
+        drawDetection(vis, det, corners, tx_deg, ty_deg, ta_percent, tvec, rvec, rawT, rawR, poseValid);
     }
 
     if (!prevGray_.empty()) {
@@ -556,23 +557,38 @@ void FrameProcessor::updateTracker(int id, const std::vector<cv::Point2f>& corne
 }
 
 bool FrameProcessor::computePoseForCorners(int id, const std::vector<cv::Point2f>& corners,
-                                           cv::Vec3d& tvec, cv::Vec3d& rvec, double& reprojErr)
+                                           cv::Vec3d& tvec, cv::Vec3d& rvec, double& reprojErr,
+                                           bool smooth,
+                                           cv::Vec3d* rawTvecOut, cv::Vec3d* rawRvecOut)
 {
     auto poseResult = poseEstimator_->solvePose(corners, tagSizeM_, cameraMatrix_, distCoeffs_);
     if (!poseResult) {
         return false;
     }
 
+    cv::Vec3d rawT(poseResult->tvec[0], poseResult->tvec[1], poseResult->tvec[2]);
+    cv::Vec3d rawR(poseResult->rvec[0], poseResult->rvec[1], poseResult->rvec[2]);
+    reprojErr = poseResult->reprojError;
+
+    if (rawTvecOut) *rawTvecOut = rawT;
+    if (rawRvecOut) *rawRvecOut = rawR;
+
+    if (!smooth) {
+        tvec = rawT;
+        rvec = rawR;
+        return true;
+    }
+
     auto& posSmooth = posSmoothers_[id];
     if (!posSmooth || std::abs(posSmooth->getAlpha() - emaPosAlpha_) > 1e-9)
         posSmooth = std::make_unique<EMASmoother>(emaPosAlpha_);
-    Eigen::Vector3d tvecE(poseResult->tvec[0], poseResult->tvec[1], poseResult->tvec[2]);
+    Eigen::Vector3d tvecE(rawT[0], rawT[1], rawT[2]);
     Eigen::VectorXd sPos = posSmooth->update(tvecE);
 
     auto& poseSmooth = poseSmoothers_[id];
     if (!poseSmooth || std::abs(poseSmooth->getAlpha() - emaPoseAlpha_) > 1e-9)
         poseSmooth = std::make_unique<EMASmoother>(emaPoseAlpha_);
-    Eigen::Vector3d rvecE(poseResult->rvec[0], poseResult->rvec[1], poseResult->rvec[2]);
+    Eigen::Vector3d rvecE(rawR[0], rawR[1], rawR[2]);
     Eigen::VectorXd sRot = poseSmooth->update(rvecE);
 
     if (config::POSE_MEDIAN_WINDOW > 1) {
@@ -592,7 +608,6 @@ bool FrameProcessor::computePoseForCorners(int id, const std::vector<cv::Point2f
         rvec = cv::Vec3d(sRot(0), sRot(1), sRot(2));
     }
 
-    reprojErr = poseResult->reprojError;
     return true;
 }
 
@@ -665,8 +680,9 @@ void FrameProcessor::predictInvisibleTags(cv::Mat& vis, int width, int height,
                 cv::polylines(vis, pts, true, cv::Scalar(0, 180, 255), 2, cv::LINE_AA);
 
                 cv::Vec3d tvec(0, 0, 0), rvec(0, 0, 0);
+                cv::Vec3d rawT(0, 0, 0), rawR(0, 0, 0);
                 double reprojErr = 0.0;
-                if (cameraMatrix_.total() > 0 && computePoseForCorners(id, p1, tvec, rvec, reprojErr)) {
+                if (cameraMatrix_.total() > 0 && computePoseForCorners(id, p1, tvec, rvec, reprojErr, true, &rawT, &rawR)) {
                     double tx_deg = 0.0, ty_deg = 0.0, ta = 0.0;
                     PoseEstimator::computeLimelightValues(p1, cameraMatrix_, width, height, tx_deg, ty_deg, ta);
 
@@ -683,7 +699,7 @@ void FrameProcessor::predictInvisibleTags(cv::Mat& vis, int width, int height,
                         stats.poseEuler = rvecToEuler(rvec);
                     }
 
-                    cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, rvec, tvec,
+                    cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, rawR, rawT,
                                       static_cast<float>(tagSizeM_), 2);
                 }
 
@@ -720,9 +736,59 @@ void FrameProcessor::predictInvisibleTags(cv::Mat& vis, int width, int height,
                 s  = std::clamp(s,  config::MIN_SCALE_PX,       config::MAX_SCALE_PX);
 
                 drawPrediction(vis, id, cx, cy, s, false);
+
+                std::vector<cv::Point2f> predictedCorners;
+                if (cameraMatrix_.total() > 0 && buildPredictedCorners(id, cx, cy, s, predictedCorners)) {
+                    double tx_deg = 0.0, ty_deg = 0.0, ta = 0.0;
+                    PoseEstimator::computeLimelightValues(predictedCorners, cameraMatrix_, width, height, tx_deg, ty_deg, ta);
+
+                    cv::Vec3d tvec(0, 0, 0), rvec(0, 0, 0);
+                    cv::Vec3d rawT(0, 0, 0), rawR(0, 0, 0);
+                    double reprojErr = 0.0;
+                    if (computePoseForCorners(id, predictedCorners, tvec, rvec, reprojErr, true, &rawT, &rawR)) {
+                        TagData td;
+                        td.id = id;
+                        td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta;
+                        td.tvec = tvec; td.rvec = rvec; td.reprojError = reprojErr;
+                        tagDataOut.push_back(td);
+
+                        if (!stats.hasPose) {
+                            stats.hasPose = true;
+                            stats.poseTvec = tvec;
+                            stats.poseRvec = rvec;
+                            stats.poseEuler = rvecToEuler(rvec);
+                        }
+
+                        cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, rawR, rawT,
+                                          static_cast<float>(tagSizeM_), 2);
+                    }
+                }
             }
         }
     }
+}
+
+bool FrameProcessor::buildPredictedCorners(int id, double cx, double cy, double scale,
+                                           std::vector<cv::Point2f>& out) {
+    auto last = lastCorners_.find(id);
+    if (last == lastCorners_.end() || last->second.size() != 4) return false;
+
+    const auto ordered = PoseEstimator::orderCorners(last->second);
+    double baseCx = 0.0, baseCy = 0.0;
+    for (const auto& pt : ordered) { baseCx += pt.x; baseCy += pt.y; }
+    baseCx /= ordered.size(); baseCy /= ordered.size();
+
+    const double baseDiag = std::max(1.0, cv::norm(ordered[0] - ordered[2]));
+    const double s = scale / baseDiag;
+
+    out.resize(4);
+    for (size_t i = 0; i < ordered.size(); ++i) {
+        const double dx = ordered[i].x - baseCx;
+        const double dy = ordered[i].y - baseCy;
+        out[i] = cv::Point2f(static_cast<float>(cx + dx * s),
+                             static_cast<float>(cy + dy * s));
+    }
+    return true;
 }
 
 void FrameProcessor::purgeOldTrackers(const std::set<int>& visibleIds) {
@@ -748,6 +814,7 @@ void FrameProcessor::drawDetection(cv::Mat& vis, const Detection& det,
                                   const std::vector<cv::Point2f>& corners,
                                   double tx, double ty, double ta,
                                   const cv::Vec3d& tvec, const cv::Vec3d& rvec,
+                                  const cv::Vec3d& rawTvec, const cv::Vec3d& rawRvec,
                                   bool poseValid)
 {
     std::vector<cv::Point> pts; pts.reserve(corners.size());
@@ -795,7 +862,9 @@ void FrameProcessor::drawDetection(cv::Mat& vis, const Detection& det,
                 cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
 
     if (poseValid && !cameraMatrix_.empty() && cameraMatrix_.total() > 0) {
-        cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, rvec, tvec,
+        const cv::Vec3d& axisR = (cv::norm(rawRvec) > 0.0) ? rawRvec : rvec;
+        const cv::Vec3d& axisT = (cv::norm(rawTvec) > 0.0) ? rawTvec : tvec;
+        cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, axisR, axisT,
                           static_cast<float>(tagSizeM_), 2);
     }
 }

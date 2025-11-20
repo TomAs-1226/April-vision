@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <cctype>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -503,7 +504,7 @@ void VisionApp::processingLoop() {
     cv::Mat frame;
     auto lastLog = std::chrono::steady_clock::now();
     while (processingRunning_) {
-        if (!frameExchange_.acquire(frame, std::chrono::milliseconds(10))) {
+        if (!frameExchange_.acquire(frame, std::chrono::milliseconds(4))) {
             continue;
         }
         if (frame.empty()) {
@@ -648,6 +649,13 @@ private:
         } catch (...) {
             return fallback;
         }
+    }
+
+    static std::string trimCopy(std::string s) {
+        auto notSpace = [](int ch) { return !std::isspace(ch); };
+        s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
+        s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+        return s;
     }
 
     static std::string dashboardHtml();
@@ -813,7 +821,7 @@ void WebDashboard::handleSettings(const httplib::Request& req, httplib::Response
     snap.gainSlider = paramInt(req, "gain", snap.gainSlider);
     snap.brightnessSlider = paramInt(req, "brightness", snap.brightnessSlider);
     if (req.has_param("ntServer")) {
-        snap.ntServer = req.get_param_value("ntServer");
+        snap.ntServer = trimCopy(req.get_param_value("ntServer"));
     }
 
     app_.applySettings(snap);
@@ -846,8 +854,8 @@ std::string WebDashboard::dashboardHtml() {
 <body>
   <div class='top'>
     <div>
-      <div style='font-size:14px;color:#8b949e'>Limelight-style control</div>
-      <div style='font-size:22px;font-weight:700;'>" << config::WEB_DASHBOARD_TITLE << R"(</div>
+      <div style='font-size:14px;color:#8b949e'>Limelight-style vision</div>
+      <div style='font-size:22px;font-weight:700;'>{{TITLE}}</div>
     </div>
     <div id='ipList' style='font-size:14px;color:#8b949e'></div>
   </div>
@@ -1013,7 +1021,12 @@ std::string WebDashboard::dashboardHtml() {
   </script>
 </body>
 </html>)";
-    return html.str();
+    std::string page = html.str();
+    const std::string placeholder = "{{TITLE}}";
+    if (auto pos = page.find(placeholder); pos != std::string::npos) {
+        page.replace(pos, placeholder.size(), config::WEB_DASHBOARD_TITLE);
+    }
+    return page;
 }
 
 

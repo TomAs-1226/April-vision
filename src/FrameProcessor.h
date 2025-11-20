@@ -82,11 +82,16 @@ private:
     // Tracking helpers
     void updateTracker(int id, const std::vector<cv::Point2f>& corners);
     bool computePoseForCorners(int id, const std::vector<cv::Point2f>& corners,
-                               cv::Vec3d& tvec, cv::Vec3d& rvec, double& reprojErr);
+                               cv::Vec3d& tvec, cv::Vec3d& rvec, double& reprojErr,
+                               bool smooth = true,
+                               cv::Vec3d* rawTvecOut = nullptr,
+                               cv::Vec3d* rawRvecOut = nullptr);
     void predictInvisibleTags(cv::Mat& vis, int width, int height,
                              const std::set<int>& visibleIds,
                              const cv::Mat& grayPrev, const cv::Mat& grayCurr,
                              std::vector<TagData>& tagDataOut, ProcessingStats& stats);
+    bool buildPredictedCorners(int id, double cx, double cy, double scale,
+                               std::vector<cv::Point2f>& out);
     void purgeOldTrackers(const std::set<int>& visibleIds);
 
     // Visualization
@@ -94,6 +99,7 @@ private:
                       const std::vector<cv::Point2f>& corners,
                       double tx, double ty, double ta,
                       const cv::Vec3d& tvec, const cv::Vec3d& rvec,
+                      const cv::Vec3d& rawTvec, const cv::Vec3d& rawRvec,
                       bool poseValid);
     void drawPrediction(cv::Mat& vis, int id, double cx, double cy, double s, bool isOpticalFlow);
 
