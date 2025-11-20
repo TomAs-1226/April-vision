@@ -161,8 +161,10 @@ void FrameProcessor::setHighSpeedMode(bool enabled) {
 
 void FrameProcessor::configureHighSpeed(const HighSpeedConfig& cfg) {
     highSpeedConfig_ = cfg;
-    highSpeedConfig_.forcedSize.width = std::max(32, highSpeedConfig_.forcedSize.width);
-    highSpeedConfig_.forcedSize.height = std::max(32, highSpeedConfig_.forcedSize.height);
+    if (highSpeedConfig_.forcedSize.width > 0 && highSpeedConfig_.forcedSize.height > 0) {
+        highSpeedConfig_.forcedSize.width = std::max(32, highSpeedConfig_.forcedSize.width);
+        highSpeedConfig_.forcedSize.height = std::max(32, highSpeedConfig_.forcedSize.height);
+    }
     highSpeedConfig_.roiPersistence = std::max(1, highSpeedConfig_.roiPersistence);
     highSpeedConfig_.minEdge = std::max(8, highSpeedConfig_.minEdge);
 }
@@ -361,7 +363,7 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
     const double blurVar = computeBlurVariance(detectView);
     int decimate = chooseDecimate(baseDecimate_, blurVar);
     if (highSpeedMode_) {
-        decimate = std::max(decimate, 2);
+        decimate = std::max(decimate, config::HIGH_SPEED_MIN_DECIMATE);
     }
     detector_->setDecimate(static_cast<float>(decimate));
 

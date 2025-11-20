@@ -148,7 +148,7 @@ struct SettingsSnapshot {
     bool roiOverlay{true};
     bool grayPreview{false};
     bool diagnostics{true};
-    bool autoExposure{true};
+    bool autoExposure{false};
     int exposureSlider{static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE * 0.55)};
     int gainSlider{static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE * 0.3)};
     int brightnessSlider{static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE * 0.5)};
@@ -219,7 +219,7 @@ private:
 
     std::atomic<int> previewFast_{1};
 
-    std::atomic<int> autoExposure_{1};
+    std::atomic<int> autoExposure_{0};
     std::atomic<int> exposure_{static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE * 0.55)};
     std::atomic<int> gain_{static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE * 0.3)};
     std::atomic<int> brightness_{static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE * 0.5)};
@@ -633,6 +633,15 @@ private:
         }
     }
 
+    static double paramDouble(const httplib::Request& req, const std::string& key, double fallback) {
+        if (!req.has_param(key)) return fallback;
+        try {
+            return std::stod(req.get_param_value(key));
+        } catch (...) {
+            return fallback;
+        }
+    }
+
     static std::string dashboardHtml();
 
     void handleState(const httplib::Request& req, httplib::Response& res);
@@ -789,9 +798,9 @@ void WebDashboard::handleSettings(const httplib::Request& req, httplib::Response
     snap.autoExposure = paramOn(req, "autoExposure", snap.autoExposure);
 
     snap.decimate = paramInt(req, "decimate", snap.decimate);
-    snap.gamma = paramInt(req, "gamma", static_cast<int>(snap.gamma * 100)) / 100.0;
-    snap.emaPos = paramInt(req, "emaPos", static_cast<int>(snap.emaPos * 100)) / 100.0;
-    snap.emaPose = paramInt(req, "emaPose", static_cast<int>(snap.emaPose * 100)) / 100.0;
+    snap.gamma = paramDouble(req, "gamma", snap.gamma);
+    snap.emaPos = paramDouble(req, "emaPos", snap.emaPos);
+    snap.emaPose = paramDouble(req, "emaPose", snap.emaPose);
     snap.exposureSlider = paramInt(req, "exposure", snap.exposureSlider);
     snap.gainSlider = paramInt(req, "gain", snap.gainSlider);
     snap.brightnessSlider = paramInt(req, "brightness", snap.brightnessSlider);
