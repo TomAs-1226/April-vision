@@ -104,6 +104,7 @@ private:
                       const cv::Vec3d& tvec, const cv::Vec3d& rvec,
                       const cv::Vec3d& rawTvec, const cv::Vec3d& rawRvec,
                       bool poseValid);
+    void drawSurfaceAxes(cv::Mat& vis, const cv::Vec3d& rvec, const cv::Vec3d& tvec);
     void drawPrediction(cv::Mat& vis, int id, double cx, double cy, double s, bool isOpticalFlow);
 
     // Members

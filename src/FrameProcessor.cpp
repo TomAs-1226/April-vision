@@ -951,7 +951,35 @@ void FrameProcessor::drawDetection(cv::Mat& vis, const Detection& det,
         const cv::Vec3d& axisT = (cv::norm(rawTvec) > 0.0) ? rawTvec : tvec;
         cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, axisR, axisT,
                           static_cast<float>(tagSizeM_), 2);
+        drawSurfaceAxes(vis, axisR, axisT);
     }
+}
+
+void FrameProcessor::drawSurfaceAxes(cv::Mat& vis, const cv::Vec3d& rvec, const cv::Vec3d& tvec) {
+    if (cameraMatrix_.empty() || cameraMatrix_.total() == 0) return;
+
+    const double axisLen = std::max(0.025, tagSizeM_ * 0.6);
+
+    std::vector<cv::Point3f> axesPts = {
+        {0.f, 0.f, 0.f},
+        {static_cast<float>(axisLen), 0.f, 0.f},
+        {0.f, static_cast<float>(axisLen), 0.f},
+        {0.f, 0.f, static_cast<float>(axisLen)}
+    };
+
+    std::vector<cv::Point2f> proj;
+    try {
+        cv::projectPoints(axesPts, rvec, tvec, cameraMatrix_, distCoeffs_, proj);
+    } catch (...) {
+        return;
+    }
+
+    if (proj.size() != axesPts.size()) return;
+
+    const cv::Point origin = proj[0];
+    cv::line(vis, origin, proj[1], cv::Scalar(0, 0, 255), 2, cv::LINE_AA);   // X (red)
+    cv::line(vis, origin, proj[2], cv::Scalar(0, 255, 0), 2, cv::LINE_AA);   // Y (green)
+    cv::line(vis, origin, proj[3], cv::Scalar(255, 0, 0), 2, cv::LINE_AA);   // Z (blue)
 }
 
 void FrameProcessor::drawPrediction(cv::Mat& vis, int id, double cx, double cy, double s, bool isOpticalFlow) {
