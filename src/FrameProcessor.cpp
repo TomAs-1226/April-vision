@@ -360,8 +360,20 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
     cv::Mat detectView = grayProc(roiRect);
     if (!detectView.isContinuous()) detectView = detectView.clone();
 
+    double recentAvgMs = 0.0;
+    if (!processTimeHist_.empty()) {
+        for (double t : processTimeHist_) recentAvgMs += t;
+        recentAvgMs /= processTimeHist_.size();
+    }
+
     const double blurVar = computeBlurVariance(detectView);
     int decimate = chooseDecimate(baseDecimate_, blurVar);
+    const double targetMs = 1000.0 / 60.0; // aim for >=60fps processing
+    if (recentAvgMs > targetMs * 1.5) {
+        decimate = std::max(decimate, config::HIGH_SPEED_MIN_DECIMATE + 2);
+    } else if (recentAvgMs > targetMs * 1.15) {
+        decimate = std::max(decimate, config::HIGH_SPEED_MIN_DECIMATE + 1);
+    }
     if (highSpeedMode_) {
         decimate = std::max(decimate, config::HIGH_SPEED_MIN_DECIMATE);
     }

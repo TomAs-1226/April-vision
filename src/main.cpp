@@ -225,6 +225,7 @@ private:
     std::atomic<int> gain_{static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE * 0.3)};
     std::atomic<int> brightness_{static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE * 0.5)};
 
+    mutable std::mutex ntMutex_;
     std::string ntServer_ = config::NT_SERVER;
 };
 
@@ -297,7 +298,10 @@ SettingsSnapshot VisionApp::getSettings() const {
     snap.gainSlider = gain_.load();
     snap.brightnessSlider = brightness_.load();
     snap.udp = udp_.load() > 0;
-    snap.ntServer = ntServer_;
+    {
+        std::lock_guard<std::mutex> lock(ntMutex_);
+        snap.ntServer = ntServer_;
+    }
     return snap;
 }
 
@@ -316,7 +320,11 @@ void VisionApp::applySettings(const SettingsSnapshot& updated) {
     diagnostics_.store(updated.diagnostics ? 1 : 0);
     udp_.store(updated.udp ? 1 : 0);
     previewFast_.store(updated.fastPreview ? 1 : 0);
-    ntServer_ = updated.ntServer.empty() ? config::NT_SERVER : updated.ntServer;
+    {
+        std::lock_guard<std::mutex> lock(ntMutex_);
+        ntServer_ = updated.ntServer.empty() ? config::NT_SERVER : updated.ntServer;
+        publisher_->setNtServer(ntServer_);
+    }
 
     autoExposure_.store(updated.autoExposure ? 1 : 0);
     exposure_.store(std::clamp(updated.exposureSlider, 0, static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE)));
@@ -325,7 +333,6 @@ void VisionApp::applySettings(const SettingsSnapshot& updated) {
 
     publisher_->enableNetworkTables(updated.publishNT);
     publisher_->enableUDP(updated.udp);
-    publisher_->setNtServer(ntServer_);
 
     if (restartNeeded) {
         processor_->resetTracking();

@@ -2,6 +2,7 @@
 #include "Config.h"
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 // Define M_PI for MSVC
@@ -94,49 +95,60 @@ std::optional<PoseResult> PoseEstimator::solvePose(
 
     cv::Vec3d rvec, tvec;
 
-    // Try IPPE_SQUARE first
-    bool success = false;
-    try {
-        success = cv::solvePnP(objPoints, orderedCorners, cameraMatrix, distCoeffs,
-                              rvec, tvec, false, cv::SOLVEPNP_IPPE_SQUARE);
-    } catch (...) {
-        success = false;
-    }
-
-    // Fallback to iterative
-    if (!success) {
+    auto solveAndScore = [&](int method, cv::Vec3d& outR, cv::Vec3d& outT) -> std::optional<double> {
         try {
-            success = cv::solvePnP(objPoints, orderedCorners, cameraMatrix, distCoeffs,
-                                  rvec, tvec, false, cv::SOLVEPNP_ITERATIVE);
+            if (!cv::solvePnP(objPoints, orderedCorners, cameraMatrix, distCoeffs,
+                               outR, outT, false, method)) {
+                return std::nullopt;
+            }
         } catch (...) {
             return std::nullopt;
         }
+
+        std::vector<cv::Point2f> projectedPoints;
+        cv::projectPoints(objPoints, outR, outT, cameraMatrix, distCoeffs, projectedPoints);
+        double totalError = 0.0;
+        for (size_t i = 0; i < orderedCorners.size(); i++) {
+            cv::Point2f diff = orderedCorners[i] - projectedPoints[i];
+            totalError += cv::norm(diff);
+        }
+        const double avgError = totalError / orderedCorners.size();
+        if (!std::isfinite(avgError)) return std::nullopt;
+        return avgError;
+    };
+
+    cv::Vec3d bestR, bestT;
+    double bestErr = std::numeric_limits<double>::max();
+
+    const int methods[] = {cv::SOLVEPNP_IPPE_SQUARE, cv::SOLVEPNP_SQPNP, cv::SOLVEPNP_ITERATIVE};
+    for (int method : methods) {
+        cv::Vec3d rTmp, tTmp;
+        if (auto err = solveAndScore(method, rTmp, tTmp)) {
+            if (*err < bestErr) {
+                bestErr = *err;
+                bestR = rTmp;
+                bestT = tTmp;
+            }
+        }
     }
 
-    if (!success) {
+    if (!std::isfinite(bestErr) || bestErr > config::REPROJ_ERR_THRESH) {
         return std::nullopt;
     }
 
-    // Compute reprojection error
-    std::vector<cv::Point2f> projectedPoints;
-    cv::projectPoints(objPoints, rvec, tvec, cameraMatrix, distCoeffs, projectedPoints);
-
-    double totalError = 0.0;
-    for (size_t i = 0; i < orderedCorners.size(); i++) {
-        cv::Point2f diff = orderedCorners[i] - projectedPoints[i];
-        totalError += cv::norm(diff);
-    }
-    double avgError = totalError / orderedCorners.size();
-
-    // Validate reprojection error
-    if (!std::isfinite(avgError) || avgError > config::REPROJ_ERR_THRESH) {
-        return std::nullopt;
+    try {
+        cv::solvePnPRefineLM(objPoints, orderedCorners, cameraMatrix, distCoeffs, bestR, bestT);
+        if (auto err = solveAndScore(cv::SOLVEPNP_ITERATIVE, bestR, bestT)) {
+            bestErr = *err;
+        }
+    } catch (...) {
+        // keep previous best
     }
 
     PoseResult result;
-    result.rvec = rvec;
-    result.tvec = tvec;
-    result.reprojError = avgError;
+    result.rvec = bestR;
+    result.tvec = bestT;
+    result.reprojError = bestErr;
 
     return result;
 }
