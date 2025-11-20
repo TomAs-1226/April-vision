@@ -133,7 +133,8 @@ endif()
 
 target_include_directories(${PROJECT_NAME} PRIVATE
         ${OpenCV_INCLUDE_DIRS}
-        ${EIGEN3_INCLUDE_DIR}
+        ${EIGEN3_INCLUDE_DIR})
+target_include_directories(${PROJECT_NAME} SYSTEM PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
 
 if(NOT APRILTAG_BUNDLED)
@@ -212,23 +213,27 @@ if(WIN32)
     endfunction()
 
     # Try to gather OpenCV runtime DLLs.  vcpkg keeps them in "bin" alongside
-    # the "lib" directory exposed through OpenCV's config.
-    set(_opencv_bin_dir "")
+    # the "lib" directory exposed through OpenCV's config.  Debug builds place
+    # the DLLs in a sibling "debug/bin" folder, so sweep both.
+    set(_opencv_bin_dirs "")
     if(DEFINED OpenCV_BIN_DIR)
-        set(_opencv_bin_dir "${OpenCV_BIN_DIR}")
+        list(APPEND _opencv_bin_dirs "${OpenCV_BIN_DIR}")
     elseif(OpenCV_DIR)
         get_filename_component(_opencv_share_dir "${OpenCV_DIR}" DIRECTORY)
         get_filename_component(_opencv_root_dir "${_opencv_share_dir}" DIRECTORY)
-        set(_opencv_bin_dir "${_opencv_root_dir}/bin")
+        list(APPEND _opencv_bin_dirs "${_opencv_root_dir}/bin" "${_opencv_root_dir}/debug/bin")
     endif()
 
-    if(_opencv_bin_dir AND EXISTS "${_opencv_bin_dir}")
-        file(GLOB _opencv_runtime_dlls "${_opencv_bin_dir}/*.dll")
-        list(REMOVE_DUPLICATES _opencv_runtime_dlls)
-        foreach(_dll ${_opencv_runtime_dlls})
-            _apriltag_stage_dll("${_dll}")
-        endforeach()
-    endif()
+    list(REMOVE_DUPLICATES _opencv_bin_dirs)
+    foreach(_dir ${_opencv_bin_dirs})
+        if(EXISTS "${_dir}")
+            file(GLOB _opencv_runtime_dlls "${_dir}/*.dll")
+            list(REMOVE_DUPLICATES _opencv_runtime_dlls)
+            foreach(_dll ${_opencv_runtime_dlls})
+                _apriltag_stage_dll("${_dll}")
+            endforeach()
+        endif()
+    endforeach()
 
     # Gather AprilTag runtime DLLs
     set(_apriltag_candidate_dirs)
@@ -241,6 +246,24 @@ if(WIN32)
                 "${_apriltag_lib_dir}"
                 "${_apriltag_lib_dir}/Release"
                 "${_apriltag_lib_dir}/Debug")
+    elseif(APRILTAG_BUNDLED)
+        if(TARGET apriltag)
+            get_target_property(_apriltag_location apriltag BINARY_DIR)
+            if(NOT _apriltag_location)
+                set(_apriltag_location "${apriltag_BINARY_DIR}")
+            endif()
+            if(_apriltag_location)
+                list(APPEND _apriltag_candidate_dirs
+                        "${_apriltag_location}"
+                        "${_apriltag_location}/Release"
+                        "${_apriltag_location}/Debug")
+            endif()
+        elseif(DEFINED apriltag_BINARY_DIR)
+            list(APPEND _apriltag_candidate_dirs
+                    "${apriltag_BINARY_DIR}"
+                    "${apriltag_BINARY_DIR}/Release"
+                    "${apriltag_BINARY_DIR}/Debug")
+        endif()
     endif()
     list(REMOVE_DUPLICATES _apriltag_candidate_dirs)
     foreach(_dir ${_apriltag_candidate_dirs})
