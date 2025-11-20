@@ -188,7 +188,15 @@ endif()
 #
 if(WIN32)
     set(APRILTAG_RUNTIME_DIR "" CACHE PATH "Directory containing AprilTag runtime DLLs (optional)")
-    # Helper to register a copy command only if the DLL exists at configure time.
+    # Track runtime DLLs so we can both stage them next to the executable and
+    # install them into the portable bundle.  Using a global property keeps the
+    # helper function simple.
+    set_property(GLOBAL PROPERTY APRILV_RUNTIME_DLLS "")
+
+    # Helper to register a copy command only if the DLL exists at configure
+    # time.  Also records the DLL for install() so the portable bundle includes
+    # all Windows runtime dependencies (avoids STATUS_DLL_NOT_FOUND / 0xC0000135
+    # errors on fresh machines).
     function(_apriltag_stage_dll dll_path)
         if(EXISTS "${dll_path}")
             add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
@@ -196,6 +204,10 @@ if(WIN32)
                     "${dll_path}"
                     "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
                     VERBATIM)
+
+            get_property(_dlls GLOBAL PROPERTY APRILV_RUNTIME_DLLS)
+            list(APPEND _dlls "${dll_path}")
+            set_property(GLOBAL PROPERTY APRILV_RUNTIME_DLLS "${_dlls}")
         endif()
     endfunction()
 
@@ -239,6 +251,26 @@ if(WIN32)
             endforeach()
         endif()
     endforeach()
+
+    if(TARGET ntcore)
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                $<TARGET_FILE:ntcore>
+                "$<TARGET_FILE_DIR:${PROJECT_NAME}>"
+                VERBATIM)
+
+        install(FILES $<TARGET_FILE:ntcore>
+                DESTINATION ${CMAKE_INSTALL_BINDIR})
+    endif()
+
+    # Install any staged runtime DLLs into the portable bundle so running the
+    # executable from the install directory succeeds without manual copying.
+    get_property(_apriltag_runtime_files GLOBAL PROPERTY APRILV_RUNTIME_DLLS)
+    if(_apriltag_runtime_files)
+        list(REMOVE_DUPLICATES _apriltag_runtime_files)
+        install(FILES ${_apriltag_runtime_files}
+                DESTINATION ${CMAKE_INSTALL_BINDIR})
+    endif()
 endif()
 
 # Windows specific
