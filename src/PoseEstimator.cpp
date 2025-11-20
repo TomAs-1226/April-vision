@@ -84,6 +84,12 @@ std::optional<PoseResult> PoseEstimator::solvePose(
 
     const std::vector<cv::Point2f> orderedCorners = orderCorners(corners);
 
+    cv::Point2f centroid(0.f, 0.f);
+    for (const auto& pt : orderedCorners) {
+        centroid += pt;
+    }
+    centroid *= 0.25f;
+
     // 3D object points (tag corners in tag frame)
     const double half = tagSizeMeters / 2.0;
     std::vector<cv::Point3f> objPoints = {
@@ -93,20 +99,28 @@ std::optional<PoseResult> PoseEstimator::solvePose(
         cv::Point3f(static_cast<float>(-half), static_cast<float>(-half), 0.0f)   // bottom-left
     };
 
-    cv::Vec3d rvec, tvec;
+    auto facingCamera = [&](const cv::Vec3d& r, const cv::Vec3d& t) {
+        if (!std::isfinite(t[0]) || !std::isfinite(t[1]) || !std::isfinite(t[2])) return false;
+        if (t[2] <= 0.0) return false;
 
-    auto solveAndScore = [&](int method, cv::Vec3d& outR, cv::Vec3d& outT) -> std::optional<double> {
-        try {
-            if (!cv::solvePnP(objPoints, orderedCorners, cameraMatrix, distCoeffs,
-                               outR, outT, false, method)) {
-                return std::nullopt;
-            }
-        } catch (...) {
-            return std::nullopt;
-        }
+        cv::Mat R;
+        cv::Rodrigues(r, R);
+        cv::Vec3d normal(
+            R.at<double>(0, 2),
+            R.at<double>(1, 2),
+            R.at<double>(2, 2));
+
+        if (!std::isfinite(normal[0]) || !std::isfinite(normal[1]) || !std::isfinite(normal[2])) return false;
+        // Keep poses whose surface normal faces the camera to prevent flipped axes.
+        return normal[2] > 0.0 && normal.dot(t) > 0.0;
+    };
+
+    auto reprojectionError = [&](const cv::Vec3d& outR, const cv::Vec3d& outT) -> std::optional<double> {
+        if (!facingCamera(outR, outT)) return std::nullopt;
 
         std::vector<cv::Point2f> projectedPoints;
         cv::projectPoints(objPoints, outR, outT, cameraMatrix, distCoeffs, projectedPoints);
+
         double totalError = 0.0;
         for (size_t i = 0; i < orderedCorners.size(); i++) {
             cv::Point2f diff = orderedCorners[i] - projectedPoints[i];
@@ -117,18 +131,70 @@ std::optional<PoseResult> PoseEstimator::solvePose(
         return avgError;
     };
 
+    auto anchorToSurface = [&](cv::Vec3d& poseR, cv::Vec3d& poseT) {
+        cv::Mat R;
+        cv::Rodrigues(poseR, R);
+        cv::Vec3d normal(
+            R.at<double>(0, 2),
+            R.at<double>(1, 2),
+            R.at<double>(2, 2));
+
+        if (!std::isfinite(normal[2]) || std::abs(normal[2]) < 1e-8) return;
+
+        const double fx = cameraMatrix.at<double>(0, 0);
+        const double fy = cameraMatrix.at<double>(1, 1);
+        const double cx = cameraMatrix.at<double>(0, 2);
+        const double cy = cameraMatrix.at<double>(1, 2);
+
+        cv::Vec3d ray(
+            (static_cast<double>(centroid.x) - cx) / fx,
+            (static_cast<double>(centroid.y) - cy) / fy,
+            1.0);
+
+        const double denom = normal.dot(ray);
+        if (std::abs(denom) < 1e-9) return;
+
+        const double planeOffset = normal.dot(poseT);
+        const double scale = planeOffset / denom;
+        if (!std::isfinite(scale)) return;
+
+        poseT = ray * scale;
+    };
+
     cv::Vec3d bestR, bestT;
     double bestErr = std::numeric_limits<double>::max();
 
-    const int methods[] = {cv::SOLVEPNP_IPPE_SQUARE, cv::SOLVEPNP_SQPNP, cv::SOLVEPNP_ITERATIVE};
-    for (int method : methods) {
-        cv::Vec3d rTmp, tTmp;
-        if (auto err = solveAndScore(method, rTmp, tTmp)) {
+    auto considerPose = [&](const cv::Vec3d& rCandidate, const cv::Vec3d& tCandidate) {
+        if (auto err = reprojectionError(rCandidate, tCandidate)) {
             if (*err < bestErr) {
                 bestErr = *err;
-                bestR = rTmp;
-                bestT = tTmp;
+                bestR = rCandidate;
+                bestT = tCandidate;
             }
+        }
+    };
+
+    try {
+        std::vector<cv::Vec3d> rvecs, tvecs;
+        cv::solvePnPGeneric(objPoints, orderedCorners, cameraMatrix, distCoeffs,
+                            rvecs, tvecs, false, cv::SOLVEPNP_IPPE_SQUARE);
+        for (size_t i = 0; i < rvecs.size() && i < tvecs.size(); ++i) {
+            considerPose(rvecs[i], tvecs[i]);
+        }
+    } catch (...) {
+        // fall back to individual methods below
+    }
+
+    const int methods[] = {cv::SOLVEPNP_SQPNP, cv::SOLVEPNP_ITERATIVE};
+    for (int method : methods) {
+        try {
+            cv::Vec3d rTmp, tTmp;
+            if (cv::solvePnP(objPoints, orderedCorners, cameraMatrix, distCoeffs,
+                             rTmp, tTmp, false, method)) {
+                considerPose(rTmp, tTmp);
+            }
+        } catch (...) {
+            continue;
         }
     }
 
@@ -138,11 +204,27 @@ std::optional<PoseResult> PoseEstimator::solvePose(
 
     try {
         cv::solvePnPRefineLM(objPoints, orderedCorners, cameraMatrix, distCoeffs, bestR, bestT);
-        if (auto err = solveAndScore(cv::SOLVEPNP_ITERATIVE, bestR, bestT)) {
-            bestErr = *err;
-        }
+        if (auto err = reprojectionError(bestR, bestT)) bestErr = *err;
     } catch (...) {
         // keep previous best
+    }
+
+    try {
+        cv::solvePnPRefineVVS(objPoints, orderedCorners, cameraMatrix, distCoeffs, bestR, bestT);
+        if (auto err = reprojectionError(bestR, bestT)) bestErr = *err;
+    } catch (...) {
+        // keep previous best
+    }
+
+    anchorToSurface(bestR, bestT);
+    if (auto err = reprojectionError(bestR, bestT)) {
+        bestErr = *err;
+    } else {
+        return std::nullopt;
+    }
+
+    if (bestErr > config::REPROJ_ERR_THRESH) {
+        return std::nullopt;
     }
 
     PoseResult result;
