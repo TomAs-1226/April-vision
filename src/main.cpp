@@ -636,10 +636,10 @@ void WebDashboard::start() {
                     std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 80};
                     cv::imencode(".jpg", frame, buf, params);
                     std::string header = "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + std::to_string(buf.size()) + "\r\n\r\n";
-                    sink.write(header.c_str(), header.size());
-                    sink.write(reinterpret_cast<const char*>(buf.data()), buf.size());
-                    sink.write("\r\n", 2);
-                    sink.flush();
+                    sink.os.write(header.c_str(), static_cast<std::streamsize>(header.size()));
+                    sink.os.write(reinterpret_cast<const char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+                    sink.os.write("\r\n", 2);
+                    sink.os.flush();
                     std::this_thread::sleep_for(frameDelay);
                 }
                 sink.done();
