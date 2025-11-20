@@ -24,6 +24,10 @@ struct ProcessingStats {
     bool roiActive{false};
     cv::Rect roiRect;
     bool highSpeedMode{false};
+    bool hasPose{false};
+    cv::Vec3d poseTvec{0, 0, 0};
+    cv::Vec3d poseRvec{0, 0, 0};
+    cv::Vec3d poseEuler{0, 0, 0};
 };
 
 struct HighSpeedConfig {
@@ -69,6 +73,7 @@ private:
     cv::Rect clampRectToImage(const cv::Rect& r, int width, int height) const;
     cv::Rect growRect(const cv::Rect& r, double scale, int width, int height, int minEdge) const;
     cv::Rect scaleRect(const cv::Rect& r, double sx, double sy) const;
+    cv::Vec3d rvecToEuler(const cv::Vec3d& rvec) const;
 
     // Detection filtering
     bool shouldProcessTag(int id);
@@ -83,7 +88,9 @@ private:
     // Visualization
     void drawDetection(cv::Mat& vis, const Detection& det,
                       const std::vector<cv::Point2f>& corners,
-                      double tx, double ty, double ta, const cv::Vec3d& tvec);
+                      double tx, double ty, double ta,
+                      const cv::Vec3d& tvec, const cv::Vec3d& rvec,
+                      bool poseValid);
     void drawPrediction(cv::Mat& vis, int id, double cx, double cy, double s, bool isOpticalFlow);
 
     // Members

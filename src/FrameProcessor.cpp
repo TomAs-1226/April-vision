@@ -196,6 +196,31 @@ cv::Rect FrameProcessor::scaleRect(const cv::Rect& r, double sx, double sy) cons
     );
 }
 
+cv::Vec3d FrameProcessor::rvecToEuler(const cv::Vec3d& rvec) const {
+    if (cv::norm(rvec) < 1e-6) return {0, 0, 0};
+
+    cv::Mat R;
+    cv::Rodrigues(rvec, R);
+
+    double sy = std::sqrt(R.at<double>(0, 0) * R.at<double>(0, 0) +
+                          R.at<double>(1, 0) * R.at<double>(1, 0));
+
+    bool singular = sy < 1e-6;
+    double roll, pitch, yaw;
+    if (!singular) {
+        roll  = std::atan2(R.at<double>(2, 1), R.at<double>(2, 2));
+        pitch = std::atan2(-R.at<double>(2, 0), sy);
+        yaw   = std::atan2(R.at<double>(1, 0), R.at<double>(0, 0));
+    } else {
+        roll  = std::atan2(-R.at<double>(1, 2), R.at<double>(1, 1));
+        pitch = std::atan2(-R.at<double>(2, 0), sy);
+        yaw   = 0;
+    }
+
+    const double rad2deg = 180.0 / M_PI;
+    return {roll * rad2deg, pitch * rad2deg, yaw * rad2deg};
+}
+
 cv::Mat FrameProcessor::preprocessImage(const cv::Mat& gray) {
     if (preprocessBuf_.empty() || preprocessBuf_.size() != gray.size()) {
         preprocessBuf_.create(gray.size(), gray.type());
@@ -438,7 +463,15 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
             }
         }
 
-        drawDetection(vis, det, corners, tx_deg, ty_deg, ta_percent, tvec);
+        const bool poseValid = cv::norm(tvec) > 0.0;
+        if (poseValid && !stats.hasPose) {
+            stats.hasPose = true;
+            stats.poseTvec = tvec;
+            stats.poseRvec = rvec;
+            stats.poseEuler = rvecToEuler(rvec);
+        }
+
+        drawDetection(vis, det, corners, tx_deg, ty_deg, ta_percent, tvec, rvec, poseValid);
     }
 
     if (!prevGray_.empty()) {
@@ -655,7 +688,9 @@ void FrameProcessor::purgeOldTrackers(const std::set<int>& visibleIds) {
 
 void FrameProcessor::drawDetection(cv::Mat& vis, const Detection& det,
                                   const std::vector<cv::Point2f>& corners,
-                                  double tx, double ty, double ta, const cv::Vec3d& tvec)
+                                  double tx, double ty, double ta,
+                                  const cv::Vec3d& tvec, const cv::Vec3d& rvec,
+                                  bool poseValid)
 {
     std::vector<cv::Point> pts; pts.reserve(corners.size());
     for (const auto& pt : corners)
@@ -670,8 +705,10 @@ void FrameProcessor::drawDetection(cv::Mat& vis, const Detection& det,
     oss << "ID" << det.id
         << " tx=" << std::fixed << std::setprecision(1) << tx
         << "° ty=" << ty
-        << "° ta=" << std::setprecision(2) << ta << "%"
-        << " Z="  << std::setprecision(3) << tvec[2] << "m";
+        << "° ta=" << std::setprecision(2) << ta << "%";
+    if (poseValid) {
+        oss << " Z="  << std::setprecision(3) << tvec[2] << "m";
+    }
 
     std::string text = oss.str();
     int baseline = 0;
@@ -698,6 +735,11 @@ void FrameProcessor::drawDetection(cv::Mat& vis, const Detection& det,
                   cv::Scalar(0, 0, 0), -1);
     cv::putText(vis, idText, {tx_text, ty_text},
                 cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
+
+    if (poseValid && !cameraMatrix_.empty() && cameraMatrix_.total() > 0) {
+        cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, rvec, tvec,
+                          static_cast<float>(tagSizeM_), 2);
+    }
 }
 
 void FrameProcessor::drawPrediction(cv::Mat& vis, int id, double cx, double cy, double s, bool isOpticalFlow) {

@@ -144,6 +144,7 @@ struct SettingsSnapshot {
     double emaPose{config::EMA_ALPHA_POSE};
     bool publishNT{true};
     bool highSpeed{config::DEFAULT_HIGH_SPEED_MODE};
+    bool fastPreview{true};
     bool roiOverlay{true};
     bool grayPreview{false};
     bool diagnostics{true};
@@ -166,6 +167,10 @@ public:
     SettingsSnapshot getSettings() const;
     void applySettings(const SettingsSnapshot& updated);
     void resetRoi();
+    void restartCameraForMode();
+
+    struct CaptureProfile { int width; int height; int fps; };
+    CaptureProfile profileForMode(bool highSpeed) const;
 
     ProcessingStats latestStats();
     cv::Mat latestFrame(bool withOverlay = true);
@@ -199,7 +204,6 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> captureRunning_{false};
     std::atomic<bool> processingRunning_{false};
-
     // UI-configurable settings
     std::atomic<int> decimate_{config::DEFAULT_DECIMATE};
     std::atomic<int> clahe_{1};
@@ -212,6 +216,8 @@ private:
     std::atomic<int> grayPreview_{0};
     std::atomic<int> diagnostics_{1};
     std::atomic<int> udp_{1};
+
+    std::atomic<int> previewFast_{1};
 
     std::atomic<int> autoExposure_{1};
     std::atomic<int> exposure_{static_cast<int>(config::CAMERA_PROP_SLIDER_SCALE * 0.55)};
@@ -241,6 +247,13 @@ VisionApp::~VisionApp() {
     stop();
 }
 
+VisionApp::CaptureProfile VisionApp::profileForMode(bool highSpeed) const {
+    if (highSpeed) {
+        return {config::FAST_CAPTURE_WIDTH, config::FAST_CAPTURE_HEIGHT, config::FAST_CAPTURE_FPS};
+    }
+    return {config::FULL_CAPTURE_WIDTH, config::FULL_CAPTURE_HEIGHT, config::FULL_CAPTURE_FPS};
+}
+
 void VisionApp::start() {
     if (running_) return;
     running_ = true;
@@ -259,6 +272,12 @@ void VisionApp::stop() {
     }
 }
 
+void VisionApp::restartCameraForMode() {
+    stopCamera();
+    frameExchange_.reset();
+    startCamera();
+}
+
 SettingsSnapshot VisionApp::getSettings() const {
     SettingsSnapshot snap;
     snap.decimate = decimate_.load();
@@ -268,6 +287,7 @@ SettingsSnapshot VisionApp::getSettings() const {
     snap.emaPose = emaPose_.load() / 100.0;
     snap.publishNT = publishNT_.load() > 0;
     snap.highSpeed = highSpeed_.load() > 0;
+    snap.fastPreview = previewFast_.load() > 0;
     snap.roiOverlay = roiOverlay_.load() > 0;
     snap.grayPreview = grayPreview_.load() > 0;
     snap.diagnostics = diagnostics_.load() > 0;
@@ -287,11 +307,13 @@ void VisionApp::applySettings(const SettingsSnapshot& updated) {
     emaPos_.store(static_cast<int>(std::clamp(updated.emaPos, 0.01, 0.99) * 100));
     emaPose_.store(static_cast<int>(std::clamp(updated.emaPose, 0.01, 0.99) * 100));
     publishNT_.store(updated.publishNT ? 1 : 0);
+    const bool prevHighSpeed = highSpeed_.load() > 0;
     highSpeed_.store(updated.highSpeed ? 1 : 0);
     roiOverlay_.store(updated.roiOverlay ? 1 : 0);
     grayPreview_.store(updated.grayPreview ? 1 : 0);
     diagnostics_.store(updated.diagnostics ? 1 : 0);
     udp_.store(updated.udp ? 1 : 0);
+    previewFast_.store(updated.fastPreview ? 1 : 0);
     ntServer_ = updated.ntServer.empty() ? config::NT_SERVER : updated.ntServer;
 
     autoExposure_.store(updated.autoExposure ? 1 : 0);
@@ -302,6 +324,9 @@ void VisionApp::applySettings(const SettingsSnapshot& updated) {
     publisher_->enableNetworkTables(updated.publishNT);
     publisher_->enableUDP(updated.udp);
     publisher_->setNtServer(ntServer_);
+    if (running_ && prevHighSpeed != updated.highSpeed) {
+        restartCameraForMode();
+    }
 }
 
 void VisionApp::resetRoi() {
@@ -342,11 +367,15 @@ cv::Mat VisionApp::latestFrame(bool withOverlay) {
 void VisionApp::startCamera() {
     if (captureRunning_) return;
 
+    const bool highSpeedMode = highSpeed_.load() > 0;
+
+    auto profile = profileForMode(highSpeedMode);
+
     camtuner::Settings settings;
     settings.index = config::CAM_IDX;
-    settings.width = config::HIGH_SPEED_WIDTH;
-    settings.height = config::HIGH_SPEED_HEIGHT;
-    settings.fps = config::CAPTURE_FPS;
+    settings.width = profile.width;
+    settings.height = profile.height;
+    settings.fps = profile.fps;
     settings.warmupFrames = config::CAM_WARMUP_FRAMES;
 
 #ifdef _WIN32
@@ -371,7 +400,7 @@ void VisionApp::startCamera() {
     captureThread_ = std::thread(&VisionApp::captureLoop, this);
 
     std::cout << "[Camera] Started (" << settings.width << "x" << settings.height
-              << " @" << settings.fps << "fps)" << std::endl;
+              << " @" << settings.fps << "fps) mode=" << (highSpeedMode ? "FAST" : "FULL") << std::endl;
     for (auto& line : opened.log) {
         std::cout << "  prop " << line << std::endl;
     }
@@ -556,6 +585,22 @@ cv::Mat VisionApp::composeDisplayFrame() {
              << " EMApose=" << emaPose_.load() / 100.0;
         cv::putText(vis, diag.str(), {16, 60}, cv::FONT_HERSHEY_SIMPLEX, 0.45,
                     cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
+
+        if (stats.hasPose) {
+            std::ostringstream pose;
+            pose << std::fixed << std::setprecision(3)
+                 << "X=" << stats.poseTvec[0] << "m  Y=" << stats.poseTvec[1]
+                 << "m  Z=" << stats.poseTvec[2] << "m";
+            cv::putText(vis, pose.str(), {16, 84}, cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                        cv::Scalar(140, 225, 255), 1, cv::LINE_AA);
+
+            std::ostringstream rpy;
+            rpy << std::fixed << std::setprecision(1)
+                << "Roll=" << stats.poseEuler[0] << "°  Pitch=" << stats.poseEuler[1]
+                << "°  Yaw=" << stats.poseEuler[2] << "°";
+            cv::putText(vis, rpy.str(), {16, 106}, cv::FONT_HERSHEY_SIMPLEX, 0.45,
+                        cv::Scalar(140, 225, 255), 1, cv::LINE_AA);
+        }
     }
 
     return vis;
@@ -619,12 +664,13 @@ void WebDashboard::start() {
         res.set_content("{\"status\":\"roi-reset\"}", "application/json");
     });
 
-    server_.Get("/stream.mjpg", [&](const httplib::Request&, httplib::Response& res) {
+    server_.Get("/stream.mjpg", [&](const httplib::Request& req, httplib::Response& res) {
         res.set_header("Cache-Control", "no-cache, no-store, must-revalidate");
         res.set_header("Pragma", "no-cache");
         res.set_header("Connection", "close");
+        const bool fastView = req.has_param("view") && req.get_param_value("view") == "fast";
         res.set_chunked_content_provider("multipart/x-mixed-replace; boundary=frame",
-            [this](size_t, httplib::DataSink& sink) {
+            [this, fastView](size_t, httplib::DataSink& sink) {
                 const auto frameDelay = std::chrono::milliseconds(static_cast<int>(1000.0 / std::max(1, config::MJPEG_STREAM_FPS)));
                 while (running_) {
                     cv::Mat frame = app_.latestFrame(true);
@@ -632,9 +678,15 @@ void WebDashboard::start() {
                         std::this_thread::sleep_for(std::chrono::milliseconds(50));
                         continue;
                     }
+                    cv::Mat streamFrame = frame;
+                    cv::Mat resized;
+                    if (fastView && config::STREAM_FAST_SCALE < 0.99) {
+                        cv::resize(frame, resized, {}, config::STREAM_FAST_SCALE, config::STREAM_FAST_SCALE, cv::INTER_AREA);
+                        streamFrame = resized;
+                    }
                     std::vector<uchar> buf;
                     std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 80};
-                    cv::imencode(".jpg", frame, buf, params);
+                    cv::imencode(".jpg", streamFrame, buf, params);
                     std::string header = "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: " + std::to_string(buf.size()) + "\r\n\r\n";
                     sink.os.write(header.c_str(), static_cast<std::streamsize>(header.size()));
                     sink.os.write(reinterpret_cast<const char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
@@ -676,6 +728,17 @@ void WebDashboard::handleState(const httplib::Request&, httplib::Response& res) 
     json << "\"roiActive\":" << (stats.roiActive ? "true" : "false") << ",";
     json << "\"roiCoverage\":" << stats.roiCoverage << ",";
     json << "\"mode\":\"" << (stats.highSpeedMode ? "high-speed" : "full" ) << "\",";
+    json << "\"pose\":{";
+    json << "\"has\":" << (stats.hasPose ? "true" : "false");
+    if (stats.hasPose) {
+        json << ",\"x\":" << stats.poseTvec[0]
+             << ",\"y\":" << stats.poseTvec[1]
+             << ",\"z\":" << stats.poseTvec[2]
+             << ",\"roll\":" << stats.poseEuler[0]
+             << ",\"pitch\":" << stats.poseEuler[1]
+             << ",\"yaw\":" << stats.poseEuler[2];
+    }
+    json << "},";
     json << "\"settings\":{"
          << "\"decimate\":" << settings.decimate << ","
          << "\"clahe\":" << (settings.clahe ? "true" : "false") << ","
@@ -684,6 +747,7 @@ void WebDashboard::handleState(const httplib::Request&, httplib::Response& res) 
          << "\"emaPose\":" << settings.emaPose << ","
          << "\"publishNT\":" << (settings.publishNT ? "true" : "false") << ","
          << "\"highSpeed\":" << (settings.highSpeed ? "true" : "false") << ","
+         << "\"fastPreview\":" << (settings.fastPreview ? "true" : "false") << ","
          << "\"roiOverlay\":" << (settings.roiOverlay ? "true" : "false") << ","
          << "\"grayPreview\":" << (settings.grayPreview ? "true" : "false") << ","
          << "\"diagnostics\":" << (settings.diagnostics ? "true" : "false") << ","
@@ -708,6 +772,7 @@ void WebDashboard::handleState(const httplib::Request&, httplib::Response& res) 
 void WebDashboard::handleSettings(const httplib::Request& req, httplib::Response& res) {
     auto snap = app_.getSettings();
     snap.highSpeed = paramOn(req, "highSpeed", snap.highSpeed);
+    snap.fastPreview = paramOn(req, "fastPreview", snap.fastPreview);
     snap.publishNT = paramOn(req, "publishNT", snap.publishNT);
     snap.roiOverlay = paramOn(req, "roiOverlay", snap.roiOverlay);
     snap.grayPreview = paramOn(req, "grayPreview", snap.grayPreview);
@@ -749,18 +814,23 @@ std::string WebDashboard::dashboardHtml() {
     html << "<div class='grid'><div class='card'><div style='display:flex;align-items:center;justify-content:space-between;'>";
     html << "<div><div style='font-size:13px;color:#8b949e'>Live Stream</div><div style='font-size:18px;font-weight:700;'>Limelight-style view</div></div>";
     html << "<div class='pill' id='modePill'>High-Speed</div></div>";
-    html << "<div style='margin-top:10px;'><img class='stream' src='/stream.mjpg' /></div>";
+    html << "<div style='margin-top:10px;'><img class='stream' src='/stream.mjpg?view=fast' /></div>";
     html << "<div id='stats' style='margin-top:12px;font-family:SFMono-Regular,Consolas,monospace;color:#e6edf3;'></div>";
+    html << "<div id='pose' style='margin-top:6px;font-family:SFMono-Regular,Consolas,monospace;color:#8b949e;'></div>";
     html << "</div>";
     html << "<div><div class='card controls'><div style='font-size:13px;color:#8b949e'>Pipeline Controls</div>";
     html << "<div class='toggle-row'>"
          << "<div class='toggle' id='toggleHigh'>High-Speed</div>"
          << "<div class='toggle' id='toggleFull'>Full-Quality</div>"
+         << "<div class='toggle' id='previewFast'>Preview: Fast</div>"
+         << "<div class='toggle' id='previewFull'>Preview: Full</div>"
          << "<div class='toggle' id='toggleNT'>NetworkTables</div>"
          << "<div class='toggle' id='toggleUDP'>UDP</div>"
          << "<div class='toggle' id='toggleROI'>ROI Overlay</div>"
          << "<div class='toggle' id='toggleGray'>Gray Preview</div>"
          << "<div class='toggle' id='toggleCLAHE'>CLAHE</div>"
+         << "<div class='toggle' id='toggleAuto'>Auto Exposure</div>"
+         << "<div class='toggle' id='toggleDiag'>Diagnostics</div>"
          << "</div>";
     html << "<label>Decimate<input type='number' id='decimate' min='1' max='5' /></label>";
     html << "<label>Gamma<input type='number' id='gamma' step='0.05' min='0.5' max='3.0' /></label>";
@@ -774,7 +844,7 @@ std::string WebDashboard::dashboardHtml() {
     html << "<button id='resetBtn' style='padding:10px;border-radius:8px;border:1px solid #30363d;background:#0d1117;color:#e6edf3;cursor:pointer;'>Reset ROI</button></div>";
     html << "</div></div></div>";
 
-    html << "<script>\nconst DASH_PORT=" << config::WEB_PORT << ";\nconst toggles=[['toggleHigh','highSpeed'],['toggleFull','fullQuality'],['toggleNT','publishNT'],['toggleUDP','udp'],['toggleROI','roiOverlay'],['toggleGray','grayPreview'],['toggleCLAHE','clahe']];\nlet state={};\nfunction setToggle(id,on){const el=document.getElementById(id);if(!el)return;el.classList.toggle('active',on);}\nfunction refresh(){fetch('/api/state').then(r=>r.json()).then(js=>{state=js.settings;document.getElementById('decimate').value=js.settings.decimate;document.getElementById('gamma').value=js.settings.gamma;document.getElementById('emaPos').value=js.settings.emaPos;document.getElementById('emaPose').value=js.settings.emaPose;document.getElementById('exposure').value=js.settings.exposure;document.getElementById('gain').value=js.settings.gain;document.getElementById('brightness').value=js.settings.brightness;document.getElementById('ntServer').value=js.settings.ntServer;setToggle('toggleHigh',js.settings.highSpeed);setToggle('toggleFull',!js.settings.highSpeed);setToggle('toggleNT',js.settings.publishNT);setToggle('toggleUDP',js.settings.udp);setToggle('toggleROI',js.settings.roiOverlay);setToggle('toggleGray',js.settings.grayPreview);setToggle('toggleCLAHE',js.settings.clahe);document.getElementById('modePill').innerText=js.mode==='high-speed'?'High-Speed':'Full Quality';document.getElementById('stats').innerText=`${js.fps.toFixed(1)} fps | ${js.proc_ms.toFixed(2)} ms | tags ${js.tags} | blur ${js.blur.toFixed(1)} | ROI ${Math.round(js.roiCoverage*100)}%`;document.getElementById('ipList').innerText='IPs: '+js.ips.map(ip=>`http://${ip}:${DASH_PORT}`).join('  ');});}\nrefresh();setInterval(refresh,650);\nfunction collect(){const p=new URLSearchParams();p.set('decimate',document.getElementById('decimate').value);p.set('gamma',Math.max(0.5,document.getElementById('gamma').value));p.set('emaPos',document.getElementById('emaPos').value);p.set('emaPose',document.getElementById('emaPose').value);p.set('exposure',document.getElementById('exposure').value);p.set('gain',document.getElementById('gain').value);p.set('brightness',document.getElementById('brightness').value);p.set('ntServer',document.getElementById('ntServer').value);p.set('highSpeed',state.highSpeed?'1':'0');p.set('publishNT',state.publishNT?'1':'0');p.set('roiOverlay',state.roiOverlay?'1':'0');p.set('grayPreview',state.grayPreview?'1':'0');p.set('clahe',state.clahe?'1':'0');p.set('udp',state.udp?'1':'0');p.set('diagnostics',state.diagnostics?'1':'0');return p;}\nfunction push(){fetch('/api/settings',{method:'POST',body:collect()}).then(refresh);}\nfor(const [id,key] of toggles){const el=document.getElementById(id);if(!el)continue;el.addEventListener('click',()=>{if(key==='highSpeed'){state.highSpeed=true;}else if(key==='fullQuality'){state.highSpeed=false;}else{state[key]=!state[key];}push();setTimeout(refresh,200);});}\ndocument.getElementById('saveBtn').addEventListener('click',()=>{push();});document.getElementById('resetBtn').addEventListener('click',()=>fetch('/api/reset_roi').then(()=>setTimeout(refresh,200)));\n</script>";
+    html << "<script>\nconst DASH_PORT=" << config::WEB_PORT << ";\nconst toggles=[['toggleHigh','highSpeed'],['toggleFull','fullQuality'],['toggleNT','publishNT'],['toggleUDP','udp'],['toggleROI','roiOverlay'],['toggleGray','grayPreview'],['toggleCLAHE','clahe'],['toggleAuto','autoExposure'],['toggleDiag','diagnostics'],['previewFast','fastPreview'],['previewFull','fullPreview']];\nlet state={};\nfunction setToggle(id,on){const el=document.getElementById(id);if(!el)return;el.classList.toggle('active',on);}\nfunction bumpStream(){const img=document.querySelector('img.stream');if(!img)return;const mode=state.fastPreview?'fast':'full';img.src=`/stream.mjpg?view=${mode}&t=${Date.now()}`;setToggle('previewFast',mode==='fast');setToggle('previewFull',mode==='full');}\nfunction refresh(){fetch('/api/state').then(r=>r.json()).then(js=>{state=js.settings;document.getElementById('decimate').value=js.settings.decimate;document.getElementById('gamma').value=js.settings.gamma;document.getElementById('emaPos').value=js.settings.emaPos;document.getElementById('emaPose').value=js.settings.emaPose;document.getElementById('exposure').value=js.settings.exposure;document.getElementById('gain').value=js.settings.gain;document.getElementById('brightness').value=js.settings.brightness;document.getElementById('ntServer').value=js.settings.ntServer;setToggle('toggleHigh',js.settings.highSpeed);setToggle('toggleFull',!js.settings.highSpeed);setToggle('toggleNT',js.settings.publishNT);setToggle('toggleUDP',js.settings.udp);setToggle('toggleROI',js.settings.roiOverlay);setToggle('toggleGray',js.settings.grayPreview);setToggle('toggleCLAHE',js.settings.clahe);setToggle('toggleAuto',js.settings.autoExposure);setToggle('toggleDiag',js.settings.diagnostics);state.fastPreview=js.settings.fastPreview;bumpStream();document.getElementById('modePill').innerText=js.mode==='high-speed'?'High-Speed':'Full Quality';document.getElementById('stats').innerText=`${js.fps.toFixed(1)} fps | ${js.proc_ms.toFixed(2)} ms | tags ${js.tags} | blur ${js.blur.toFixed(1)} | ROI ${Math.round(js.roiCoverage*100)}%`;document.getElementById('pose').innerText=js.pose.has?`XYZ ${js.pose.x.toFixed(3)}, ${js.pose.y.toFixed(3)}, ${js.pose.z.toFixed(3)} | RPY ${js.pose.roll.toFixed(1)}, ${js.pose.pitch.toFixed(1)}, ${js.pose.yaw.toFixed(1)}`:'Pose pending';document.getElementById('ipList').innerText='IPs: '+js.ips.map(ip=>`http://${ip}:${DASH_PORT}`).join('  ');});}\nrefresh();setInterval(refresh,650);\nfunction collect(){const p=new URLSearchParams();p.set('decimate',document.getElementById('decimate').value);p.set('gamma',Math.max(0.5,document.getElementById('gamma').value));p.set('emaPos',document.getElementById('emaPos').value);p.set('emaPose',document.getElementById('emaPose').value);p.set('exposure',document.getElementById('exposure').value);p.set('gain',document.getElementById('gain').value);p.set('brightness',document.getElementById('brightness').value);p.set('ntServer',document.getElementById('ntServer').value);p.set('highSpeed',state.highSpeed?'1':'0');p.set('fastPreview',state.fastPreview?'1':'0');p.set('publishNT',state.publishNT?'1':'0');p.set('roiOverlay',state.roiOverlay?'1':'0');p.set('grayPreview',state.grayPreview?'1':'0');p.set('clahe',state.clahe?'1':'0');p.set('udp',state.udp?'1':'0');p.set('diagnostics',state.diagnostics?'1':'0');p.set('autoExposure',state.autoExposure?'1':'0');return p;}\nfunction push(){fetch('/api/settings',{method:'POST',body:collect()}).then(()=>{bumpStream();refresh();});}\nfor(const [id,key] of toggles){const el=document.getElementById(id);if(!el)continue;el.addEventListener('click',()=>{if(key==='highSpeed'){state.highSpeed=true;}else if(key==='fullQuality'){state.highSpeed=false;}else if(key==='fastPreview'){state.fastPreview=true;}else if(key==='fullPreview'){state.fastPreview=false;}else{state[key]=!state[key];}push();setTimeout(refresh,200);});}\ndocument.getElementById('saveBtn').addEventListener('click',()=>{push();});document.getElementById('resetBtn').addEventListener('click',()=>fetch('/api/reset_roi').then(()=>setTimeout(refresh,200)));\n</script>";
 
     html << "</body></html>";
     return html.str();
