@@ -517,21 +517,27 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
 
         if (cv::norm(corners[0] - corners[2]) >= 14.0 &&
             computePoseForCorners(det.id, corners, tvec, rvec, reprojErr, true, &rawT, &rawR)) {
-            TagData td;
-            td.id = det.id;
-            td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta_percent;
-            td.tvec = tvec; td.rvec = rvec; td.reprojError = reprojErr;
-            tagDataList.push_back(td);
+            const bool poseValid = cv::norm(tvec) > 0.0;
+            const cv::Vec3d eulerDeg = poseValid ? rvecToEuler(rvec) : cv::Vec3d(0, 0, 0);
+
+            if (poseValid) {
+                TagData td;
+                td.id = det.id;
+                td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta_percent;
+                td.tvec = tvec; td.rvec = rvec; td.euler = eulerDeg; td.reprojError = reprojErr;
+                tagDataList.push_back(td);
+            }
+
+            if (poseValid && !stats.hasPose) {
+                stats.hasPose = true;
+                stats.poseTvec = tvec;
+                stats.poseRvec = rvec;
+                stats.poseEuler = eulerDeg;
+            }
         }
 
         const bool poseValid = cv::norm(tvec) > 0.0;
-        if (poseValid && !stats.hasPose) {
-            stats.hasPose = true;
-            stats.poseTvec = tvec;
-            stats.poseRvec = rvec;
-            stats.poseEuler = rvecToEuler(rvec);
-        }
-
+        
         drawDetection(vis, det, corners, tx_deg, ty_deg, ta_percent, tvec, rvec, rawT, rawR, poseValid);
     }
 
@@ -759,17 +765,19 @@ void FrameProcessor::predictInvisibleTags(cv::Mat& vis, int width, int height,
                     double tx_deg = 0.0, ty_deg = 0.0, ta = 0.0;
                     PoseEstimator::computeLimelightValues(p1, cameraMatrix_, width, height, tx_deg, ty_deg, ta);
 
+                    const cv::Vec3d eulerDeg = rvecToEuler(rvec);
+
                     TagData td;
                     td.id = id;
                     td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta;
-                    td.tvec = tvec; td.rvec = rvec; td.reprojError = reprojErr;
+                    td.tvec = tvec; td.rvec = rvec; td.euler = eulerDeg; td.reprojError = reprojErr;
                     tagDataOut.push_back(td);
 
                     if (!stats.hasPose) {
                         stats.hasPose = true;
                         stats.poseTvec = tvec;
                         stats.poseRvec = rvec;
-                        stats.poseEuler = rvecToEuler(rvec);
+                        stats.poseEuler = eulerDeg;
                     }
 
                     cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, rawR, rawT,
@@ -819,17 +827,19 @@ void FrameProcessor::predictInvisibleTags(cv::Mat& vis, int width, int height,
                     cv::Vec3d rawT(0, 0, 0), rawR(0, 0, 0);
                     double reprojErr = 0.0;
                     if (computePoseForCorners(id, predictedCorners, tvec, rvec, reprojErr, true, &rawT, &rawR)) {
+                        const cv::Vec3d eulerDeg = rvecToEuler(rvec);
+
                         TagData td;
                         td.id = id;
                         td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta;
-                        td.tvec = tvec; td.rvec = rvec; td.reprojError = reprojErr;
+                        td.tvec = tvec; td.rvec = rvec; td.euler = eulerDeg; td.reprojError = reprojErr;
                         tagDataOut.push_back(td);
 
                         if (!stats.hasPose) {
                             stats.hasPose = true;
                             stats.poseTvec = tvec;
                             stats.poseRvec = rvec;
-                            stats.poseEuler = rvecToEuler(rvec);
+                            stats.poseEuler = eulerDeg;
                         }
 
                         cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, rawR, rawT,

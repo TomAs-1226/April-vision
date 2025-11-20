@@ -46,7 +46,7 @@ inline constexpr int CAMERA_CONTROL_POLL_MS = 250;
 inline constexpr const char* WEB_BIND_ADDRESS = "0.0.0.0"; // bind all so Pi is discoverable
 inline constexpr int WEB_PORT = 5805;
 inline constexpr const char* WEB_DASHBOARD_TITLE = "April Vision";
-inline constexpr int MJPEG_STREAM_FPS = 30;
+inline constexpr int MJPEG_STREAM_FPS = 120;
 inline constexpr double STREAM_FAST_SCALE = 1.0; // keep full FOV in the browser
 
 inline constexpr bool DEFAULT_HIGH_SPEED_MODE = true;
