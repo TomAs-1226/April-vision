@@ -517,21 +517,27 @@ cv::Mat FrameProcessor::processFrame(const cv::Mat& frame, ProcessingStats& stat
 
         if (cv::norm(corners[0] - corners[2]) >= 14.0 &&
             computePoseForCorners(det.id, corners, tvec, rvec, reprojErr, true, &rawT, &rawR)) {
-            TagData td;
-            td.id = det.id;
-            td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta_percent;
-            td.tvec = tvec; td.rvec = rvec; td.reprojError = reprojErr;
-            tagDataList.push_back(td);
+            const bool poseValid = cv::norm(tvec) > 0.0;
+            const cv::Vec3d eulerDeg = poseValid ? rvecToEuler(rvec) : cv::Vec3d(0, 0, 0);
+
+            if (poseValid) {
+                TagData td;
+                td.id = det.id;
+                td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta_percent;
+                td.tvec = tvec; td.rvec = rvec; td.euler = eulerDeg; td.reprojError = reprojErr;
+                tagDataList.push_back(td);
+            }
+
+            if (poseValid && !stats.hasPose) {
+                stats.hasPose = true;
+                stats.poseTvec = tvec;
+                stats.poseRvec = rvec;
+                stats.poseEuler = eulerDeg;
+            }
         }
 
         const bool poseValid = cv::norm(tvec) > 0.0;
-        if (poseValid && !stats.hasPose) {
-            stats.hasPose = true;
-            stats.poseTvec = tvec;
-            stats.poseRvec = rvec;
-            stats.poseEuler = rvecToEuler(rvec);
-        }
-
+        
         drawDetection(vis, det, corners, tx_deg, ty_deg, ta_percent, tvec, rvec, rawT, rawR, poseValid);
     }
 
@@ -759,17 +765,19 @@ void FrameProcessor::predictInvisibleTags(cv::Mat& vis, int width, int height,
                     double tx_deg = 0.0, ty_deg = 0.0, ta = 0.0;
                     PoseEstimator::computeLimelightValues(p1, cameraMatrix_, width, height, tx_deg, ty_deg, ta);
 
+                    const cv::Vec3d eulerDeg = rvecToEuler(rvec);
+
                     TagData td;
                     td.id = id;
                     td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta;
-                    td.tvec = tvec; td.rvec = rvec; td.reprojError = reprojErr;
+                    td.tvec = tvec; td.rvec = rvec; td.euler = eulerDeg; td.reprojError = reprojErr;
                     tagDataOut.push_back(td);
 
                     if (!stats.hasPose) {
                         stats.hasPose = true;
                         stats.poseTvec = tvec;
                         stats.poseRvec = rvec;
-                        stats.poseEuler = rvecToEuler(rvec);
+                        stats.poseEuler = eulerDeg;
                     }
 
                     cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, rawR, rawT,
@@ -819,17 +827,19 @@ void FrameProcessor::predictInvisibleTags(cv::Mat& vis, int width, int height,
                     cv::Vec3d rawT(0, 0, 0), rawR(0, 0, 0);
                     double reprojErr = 0.0;
                     if (computePoseForCorners(id, predictedCorners, tvec, rvec, reprojErr, true, &rawT, &rawR)) {
+                        const cv::Vec3d eulerDeg = rvecToEuler(rvec);
+
                         TagData td;
                         td.id = id;
                         td.tx_deg = tx_deg; td.ty_deg = ty_deg; td.ta_percent = ta;
-                        td.tvec = tvec; td.rvec = rvec; td.reprojError = reprojErr;
+                        td.tvec = tvec; td.rvec = rvec; td.euler = eulerDeg; td.reprojError = reprojErr;
                         tagDataOut.push_back(td);
 
                         if (!stats.hasPose) {
                             stats.hasPose = true;
                             stats.poseTvec = tvec;
                             stats.poseRvec = rvec;
-                            stats.poseEuler = rvecToEuler(rvec);
+                            stats.poseEuler = eulerDeg;
                         }
 
                         cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, rawR, rawT,
@@ -939,9 +949,61 @@ void FrameProcessor::drawDetection(cv::Mat& vis, const Detection& det,
     if (poseValid && !cameraMatrix_.empty() && cameraMatrix_.total() > 0) {
         const cv::Vec3d& axisR = (cv::norm(rawRvec) > 0.0) ? rawRvec : rvec;
         const cv::Vec3d& axisT = (cv::norm(rawTvec) > 0.0) ? rawTvec : tvec;
-        cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, axisR, axisT,
-                          static_cast<float>(tagSizeM_), 2);
+
+        try {
+            cv::drawFrameAxes(vis, cameraMatrix_, distCoeffs_, axisR, axisT,
+                              static_cast<float>(tagSizeM_), 2);
+        } catch (...) {
+            // Fall through to surface axes if standard axes rendering fails.
+        }
+
+        drawSurfaceAxes(vis, axisR, axisT);
     }
+}
+
+void FrameProcessor::drawSurfaceAxes(cv::Mat& vis, const cv::Vec3d& rvec, const cv::Vec3d& tvec) {
+    if (cameraMatrix_.empty() || cameraMatrix_.total() == 0) return;
+
+    const double axisLen = std::max(0.025, tagSizeM_ * 0.6);
+
+    std::vector<cv::Point3f> axesPts = {
+        {0.f, 0.f, 0.f},
+        {static_cast<float>(axisLen), 0.f, 0.f},
+        {0.f, static_cast<float>(axisLen), 0.f},
+        {0.f, 0.f, static_cast<float>(axisLen)}
+    };
+
+    std::vector<cv::Point2f> proj;
+    try {
+        cv::projectPoints(axesPts, rvec, tvec, cameraMatrix_, distCoeffs_, proj);
+    } catch (...) {
+        return;
+    }
+
+    if (proj.size() != axesPts.size()) return;
+
+    const auto toPoint = [](const cv::Point2f& p) {
+        return cv::Point(cvRound(p.x), cvRound(p.y));
+    };
+
+    auto stretchedTip = [](const cv::Point2f& origin, const cv::Point2f& tip) {
+        cv::Point2f dir = tip - origin;
+        const float len = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+        constexpr float kMinPx = 8.0f; // ensure visibility even when nearly face-on
+        if (len > 1e-3f && len < kMinPx) {
+            dir *= (kMinPx / len);
+        }
+        return origin + dir;
+    };
+
+    const cv::Point2f origin = proj[0];
+    const cv::Point2f xTip = stretchedTip(origin, proj[1]);
+    const cv::Point2f yTip = stretchedTip(origin, proj[2]);
+    const cv::Point2f zTip = stretchedTip(origin, proj[3]);
+
+    cv::line(vis, toPoint(origin), toPoint(xTip), cv::Scalar(0, 0, 255), 2, cv::LINE_AA);   // X (red)
+    cv::line(vis, toPoint(origin), toPoint(yTip), cv::Scalar(0, 255, 0), 2, cv::LINE_AA);   // Y (green)
+    cv::line(vis, toPoint(origin), toPoint(zTip), cv::Scalar(255, 0, 0), 2, cv::LINE_AA);   // Z (blue)
 }
 
 void FrameProcessor::drawPrediction(cv::Mat& vis, int id, double cx, double cy, double s, bool isOpticalFlow) {

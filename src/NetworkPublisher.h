@@ -33,6 +33,7 @@ struct TagData {
     double ta_percent;
     cv::Vec3d tvec;
     cv::Vec3d rvec;
+    cv::Vec3d euler;
     double reprojError;
 };
 

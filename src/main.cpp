@@ -1021,7 +1021,8 @@ std::string WebDashboard::dashboardHtml() {
       document.getElementById('resetBtn').onclick = ()=> { fetch('/api/reset_roi').then(()=>refreshState()); };
 
       refreshState();
-      setInterval(refreshState, 700);
+      const statePollMs = Math.max(8, Math.round(1000/120));
+      setInterval(refreshState, statePollMs);
     }
 
     document.addEventListener('DOMContentLoaded', wire);

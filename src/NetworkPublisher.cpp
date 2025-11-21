@@ -176,6 +176,7 @@ void NetworkPublisher::publishLoop() {
                 json << "\"ta\":" << tag.ta_percent << ",";
                 json << "\"tvec\":[" << tag.tvec[0] << "," << tag.tvec[1] << "," << tag.tvec[2] << "],";
                 json << "\"rvec\":[" << tag.rvec[0] << "," << tag.rvec[1] << "," << tag.rvec[2] << "],";
+                json << "\"euler_deg\":[" << tag.euler[0] << "," << tag.euler[1] << "," << tag.euler[2] << "],";
                 json << "\"reproj_err\":" << tag.reprojError;
                 json << "}";
             }
@@ -247,6 +248,7 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
 
     std::vector<double> ids, txs, tys, tas, reproj;
     std::vector<double> tvecs, rvecs;
+    std::vector<double> rolls, pitches, yaws;
     ids.reserve(payload.tags.size());
     txs.reserve(payload.tags.size());
     tys.reserve(payload.tags.size());
@@ -254,6 +256,9 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
     reproj.reserve(payload.tags.size());
     tvecs.reserve(payload.tags.size() * 3);
     rvecs.reserve(payload.tags.size() * 3);
+    rolls.reserve(payload.tags.size());
+    pitches.reserve(payload.tags.size());
+    yaws.reserve(payload.tags.size());
 
     for (const auto& tag : payload.tags) {
         ids.push_back(tag.id);
@@ -267,6 +272,9 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
         rvecs.push_back(tag.rvec[0]);
         rvecs.push_back(tag.rvec[1]);
         rvecs.push_back(tag.rvec[2]);
+        rolls.push_back(tag.euler[0]);
+        pitches.push_back(tag.euler[1]);
+        yaws.push_back(tag.euler[2]);
     }
 
     table_->GetEntry("ids").SetDoubleArray(ids);
@@ -276,6 +284,9 @@ void NetworkPublisher::publishNetworkTables(const VisionPayload& payload) {
     table_->GetEntry("reproj_error").SetDoubleArray(reproj);
     table_->GetEntry("tvec").SetDoubleArray(tvecs);
     table_->GetEntry("rvec").SetDoubleArray(rvecs);
+    table_->GetEntry("roll_deg").SetDoubleArray(rolls);
+    table_->GetEntry("pitch_deg").SetDoubleArray(pitches);
+    table_->GetEntry("yaw_deg").SetDoubleArray(yaws);
 #else
     (void)payload;
     ensureNetworkTables();
